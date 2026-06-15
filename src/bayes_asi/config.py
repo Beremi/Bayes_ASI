@@ -190,6 +190,7 @@ class AppConfig:
     problem: ProblemConfig
     solver: FactoryConfig
     posterior: FactoryConfig
+    initial_data: FactoryConfig | None
     initial_design: InitialDesignConfig
     surrogate: SurrogateConfig
     hmc: HMCConfig
@@ -207,6 +208,7 @@ def load_config(path: str | Path) -> AppConfig:
         problem=ProblemConfig.from_dict(raw["problem"]),
         solver=FactoryConfig.from_dict(raw["solver"]),
         posterior=FactoryConfig.from_dict(raw["posterior"]),
+        initial_data=FactoryConfig.from_dict(raw["initial_data"]) if raw.get("initial_data") else None,
         initial_design=InitialDesignConfig.from_dict(raw.get("initial_design", {})),
         surrogate=SurrogateConfig.from_dict(raw.get("surrogate", {})),
         hmc=HMCConfig.from_dict(raw.get("hmc", {})),

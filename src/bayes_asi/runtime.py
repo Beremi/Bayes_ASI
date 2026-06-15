@@ -76,6 +76,7 @@ class Coordinator:
                 "config_path": str(self.config.config_path),
             },
         )
+        self._import_initial_data()
         self._ensure_initial_design()
 
         while True:
@@ -102,6 +103,58 @@ class Coordinator:
         self._stop_workers()
         self._write_status(deadline, True, final=True)
         self.store.append_event("run_finished", {"completed_count": self.store.load_completed().n})
+
+    def _import_initial_data(self) -> None:
+        if self.config.initial_data is None:
+            return
+        loader = build_factory_object(self.config.initial_data, self.config)
+        if callable(loader):
+            initial = loader()
+        else:
+            initial = loader
+        theta = np.asarray(initial["theta"], dtype=float).reshape(-1, self.config.problem.parameter_dim)
+        outputs = np.asarray(initial["outputs"], dtype=float).reshape(-1, self.config.problem.output_dim)
+        if theta.shape[0] != outputs.shape[0]:
+            raise ValueError("initial_data theta and outputs row counts differ")
+        imported = 0
+        skipped = 0
+        for i, row in enumerate(theta):
+            key = stable_theta_key(row, self.config.active_learning.duplicate_round_decimals)
+            if key in self.known_keys:
+                skipped += 1
+                continue
+            sequence = self.next_sequence
+            self.next_sequence += 1
+            index = self.store.append_completed(
+                theta=row,
+                outputs=outputs[i],
+                elapsed_s=0.0,
+                worker_rank=-1,
+                job_sequence=sequence,
+                started_at=0.0,
+                finished_at=0.0,
+            )
+            self.known_keys.add(key)
+            imported += 1
+            self.store.append_event(
+                "initial_sample_imported",
+                {
+                    "job_id": f"initial_{sequence:08d}",
+                    "job_sequence": sequence,
+                    "hdf5_index": index,
+                    "theta": row.tolist(),
+                    "metadata": initial.get("metadata", {}),
+                },
+            )
+        self.store.append_event(
+            "initial_data_loaded",
+            {
+                "rows": int(theta.shape[0]),
+                "imported": imported,
+                "skipped_existing": skipped,
+                "metadata": initial.get("metadata", {}),
+            },
+        )
 
     def _restore_state(self) -> None:
         completed = self.store.load_completed()
@@ -364,6 +417,7 @@ class Coordinator:
             else:
                 candidate_theta = hmc_result.theta
                 candidate_logp = hmc_result.log_prob
+            posterior_path = self._save_hmc_batch(hmc_result)
             selected = self.selector.select(
                 candidate_theta=candidate_theta,
                 candidate_log_prob=candidate_logp,
@@ -382,6 +436,7 @@ class Coordinator:
                     "hmc_accept_rate": hmc_result.accept_rate,
                     "hmc_step_size": hmc_result.step_size,
                     "hmc_leapfrog_steps": hmc_result.leapfrog_steps,
+                    "posterior_batch_path": str(posterior_path),
                     "scores": selected.scores.tolist(),
                     "min_distances": selected.min_distances.tolist(),
                 },
@@ -409,6 +464,23 @@ class Coordinator:
         result = sampler.sample(initial_z)
         self.last_hmc_z = result.z[-self.config.hmc.n_chains :].copy()
         return result
+
+    def _save_hmc_batch(self, hmc_result) -> Path:
+        batch_dir = self.config.run.output_dir / "posterior_batches"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        path = batch_dir / f"surrogate_v{self.surrogate_version:04d}_batch_{int(time.time() * 1000)}.npz"
+        np.savez_compressed(
+            path,
+            z=hmc_result.z,
+            theta=hmc_result.theta,
+            log_prob=hmc_result.log_prob,
+            accept_rate=np.asarray([hmc_result.accept_rate], dtype=float),
+            step_size=np.asarray([hmc_result.step_size], dtype=float),
+            leapfrog_steps=np.asarray([hmc_result.leapfrog_steps], dtype=int),
+            mass_diag=hmc_result.mass_diag,
+            surrogate_version=np.asarray([self.surrogate_version], dtype=int),
+        )
+        return path
 
     def _desired_in_system_count(self) -> int:
         min_pending = self.config.queue.min_pending_per_worker * self.worker_count
@@ -512,4 +584,3 @@ def _evaluate_worker_job(
             "error": str(exc),
             "traceback": traceback.format_exc(),
         }
-
