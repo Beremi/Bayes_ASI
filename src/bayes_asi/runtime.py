@@ -68,6 +68,7 @@ class Coordinator:
         deadline = start + self.config.run.time_budget_seconds
         next_status = 0.0
         stop_queueing = False
+        budget_event_written = False
         self.store.append_event(
             "run_started",
             {
@@ -86,6 +87,17 @@ class Coordinator:
             now = time.monotonic()
             if now >= deadline:
                 stop_queueing = True
+                if not budget_event_written:
+                    self.store.append_event(
+                        "budget_reached",
+                        {
+                            "completed_count": self.store.load_completed().n,
+                            "pending_count": self.queue.pending_count,
+                            "running_count": self.queue.running_count,
+                            "drain_running_on_exit": self.config.run.drain_running_on_exit,
+                        },
+                    )
+                    budget_event_written = True
 
             if not stop_queueing:
                 self._maybe_refill_active_queue()
@@ -94,6 +106,20 @@ class Coordinator:
             if now >= next_status:
                 self._write_status(deadline, stop_queueing)
                 next_status = now + self.config.run.status_interval_seconds
+
+            if stop_queueing and not self.config.run.drain_running_on_exit:
+                self.store.append_event(
+                    "run_stopped_at_budget",
+                    {
+                        "completed_count": self.store.load_completed().n,
+                        "pending_count": self.queue.pending_count,
+                        "running_count": self.queue.running_count,
+                    },
+                )
+                self._write_status(deadline, True, final=True)
+                # Busy workers are inside black-box solvers and cannot receive TAG_STOP.
+                # State is flushed above, then MPI aborts the active ranks to enforce budget.
+                self.comm.Abort(0)
 
             if stop_queueing and self.queue.running_count == 0:
                 break
