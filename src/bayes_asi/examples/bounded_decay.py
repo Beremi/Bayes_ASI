@@ -10,7 +10,6 @@ from bayes_asi.config import AppConfig
 from bayes_asi.examples._common import float_vector, require_dimensions
 from bayes_asi.types import ForwardResult, SolverContext
 
-
 TIME_POINTS = torch.linspace(0.0, 3.0, 16, dtype=torch.float32)
 DEFAULT_BOUNDS = np.array([[0.5, 2.5], [0.2, 2.0], [-0.2, 0.5]], dtype=np.float32)
 

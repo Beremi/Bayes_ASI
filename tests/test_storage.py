@@ -161,7 +161,10 @@ class StorageTests(unittest.TestCase):
             store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
             for name in ("surrogate_v2.pt", "surrogate_v10.pt", "surrogate_invalid.pt"):
                 (store.checkpoints_dir / name).touch()
-            self.assertEqual(store.latest_checkpoint().name, "surrogate_v10.pt")
+            latest = store.latest_checkpoint()
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.name, "surrogate_v10.pt")
 
     def test_event_payload_supports_common_numpy_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

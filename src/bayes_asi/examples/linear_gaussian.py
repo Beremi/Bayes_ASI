@@ -9,7 +9,6 @@ from bayes_asi.config import AppConfig
 from bayes_asi.examples._common import float_vector, require_dimensions
 from bayes_asi.types import ForwardResult, SolverContext
 
-
 DESIGN_MATRIX = torch.tensor(
     [
         [1.0, 0.25],

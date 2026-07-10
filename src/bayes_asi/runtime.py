@@ -40,7 +40,7 @@ def run_mpi(config_path: str | Path) -> None:
 
 
 class Coordinator:
-    def __init__(self, config: AppConfig, comm: MPI.Comm) -> None:
+    def __init__(self, config: AppConfig, comm: Any) -> None:
         self.config = config
         self.comm = comm
         self.size = comm.Get_size()

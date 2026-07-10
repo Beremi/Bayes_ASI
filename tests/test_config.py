@@ -6,7 +6,6 @@ from pathlib import Path
 
 from bayes_asi.config import HMCConfig, QueueConfig, SurrogateConfig, load_config, resolve_dotted
 
-
 MINIMAL_CONFIG = """
 problem:
   latent_dim: 1

@@ -4,13 +4,13 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import h5py
 import numpy as np
-
 
 SCHEMA_VERSION = 1
 _CHECKPOINT_PATTERN = re.compile(r"surrogate_v(\d+)\.pt$")

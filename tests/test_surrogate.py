@@ -5,10 +5,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-
-from bayes_asi.config import SurrogateConfig
 import torch
 
+from bayes_asi.config import SurrogateConfig
 from bayes_asi.surrogate import Normalization, SurrogateModel, SurrogateTrainer, TanhMLP
 
 

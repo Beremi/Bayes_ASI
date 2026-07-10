@@ -50,3 +50,9 @@ class Posterior(Protocol):
     def log_likelihood(self, theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         """Return surrogate log likelihood for theta and predicted outputs."""
 
+
+class DifferentiableSurrogate(Protocol):
+    """Tensor-to-tensor surrogate interface required by HMC."""
+
+    def __call__(self, theta: torch.Tensor) -> torch.Tensor:
+        """Predict differentiable forward-model outputs."""

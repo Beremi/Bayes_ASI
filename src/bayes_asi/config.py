@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 import yaml
 
@@ -45,7 +46,7 @@ class FactoryConfig:
             raise ValueError("factory path must not be empty")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "FactoryConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> FactoryConfig:
         data = _mapping(raw, "factory section")
         _reject_unknown(data, {"factory", "kwargs"}, "factory")
         if "factory" not in data:
@@ -69,7 +70,7 @@ class RunConfig:
             raise ValueError("run.status_interval_seconds must be positive")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "RunConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> RunConfig:
         data = _mapping(raw, "run")
         _reject_unknown(
             data,
@@ -100,7 +101,7 @@ class ProblemConfig:
                 raise ValueError(f"problem.{name} must be positive")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ProblemConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> ProblemConfig:
         data = _mapping(raw, "problem")
         _reject_unknown(data, {"latent_dim", "parameter_dim", "output_dim"}, "problem")
         missing = sorted({"latent_dim", "parameter_dim", "output_dim"} - set(data))
@@ -122,7 +123,7 @@ class InitialDesignConfig:
             raise ValueError("initial_design.n_points must be non-negative")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "InitialDesignConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> InitialDesignConfig:
         data = _mapping(raw, "initial_design")
         _reject_unknown(data, {"n_points"}, "initial_design")
         return cls(n_points=int(_get(data, "n_points", 16)))
@@ -178,7 +179,7 @@ class SurrogateConfig:
             raise ValueError("surrogate.failure_retry_seconds must be non-negative")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "SurrogateConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> SurrogateConfig:
         data = _mapping(raw, "surrogate")
         _reject_unknown(data, set(cls.__dataclass_fields__), "surrogate")
         return cls(
@@ -231,7 +232,7 @@ class HMCConfig:
             raise ValueError("hmc.kappa must be in (0, 1]")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "HMCConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> HMCConfig:
         data = _mapping(raw, "hmc")
         _reject_unknown(data, set(cls.__dataclass_fields__), "hmc")
         return cls(
@@ -273,7 +274,7 @@ class ActiveLearningConfig:
             raise ValueError("active_learning.failure_retry_seconds must be non-negative")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ActiveLearningConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> ActiveLearningConfig:
         data = _mapping(raw, "active_learning")
         _reject_unknown(data, set(cls.__dataclass_fields__), "active_learning")
         return cls(
@@ -306,7 +307,7 @@ class QueueConfig:
             raise ValueError("queue.target_seconds_ahead and retry_limit must be non-negative")
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "QueueConfig":
+    def from_dict(cls, raw: Mapping[str, Any]) -> QueueConfig:
         data = _mapping(raw, "queue")
         _reject_unknown(data, set(cls.__dataclass_fields__), "queue")
         return cls(

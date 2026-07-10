@@ -112,7 +112,7 @@ class SurrogateModel:
         os.replace(temporary, path)
 
     @classmethod
-    def load(cls, path: Path, device: str = "cpu") -> "SurrogateModel":
+    def load(cls, path: Path, device: str = "cpu") -> SurrogateModel:
         try:
             payload = torch.load(path, map_location=device, weights_only=True)
         except TypeError:  # PyTorch versions before weights_only support.
@@ -216,8 +216,9 @@ class SurrogateTrainer:
         with torch.random.fork_rng():
             torch.manual_seed(seed)
             network = TanhMLP(self.parameter_dim, self.output_dim, self.config.hidden_layers)
-        warm_started = previous is not None and not force_scratch
-        if warm_started:
+        warm_started = False
+        if previous is not None and not force_scratch:
+            warm_started = True
             if previous.parameter_dim != self.parameter_dim or previous.output_dim != self.output_dim:
                 raise ValueError("previous surrogate dimensions do not match the trainer")
             if previous.hidden_layers != self.config.hidden_layers:

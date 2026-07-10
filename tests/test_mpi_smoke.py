@@ -10,7 +10,6 @@ import textwrap
 import unittest
 from pathlib import Path
 
-
 EXAMPLE_CASES = (
     ("nonlinear", "bayes_asi.examples.synthetic", 2, 2, 2),
     ("linear_gaussian", "bayes_asi.examples.linear_gaussian", 2, 2, 3),

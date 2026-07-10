@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -10,12 +11,11 @@ import torch
 from bayes_asi.config import build_factory_object, load_config
 from bayes_asi.types import SolverContext
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SyntheticExampleTests(unittest.TestCase):
-    def _exercise(self, config_name: str) -> tuple[object, object, torch.Tensor, torch.Tensor]:
+    def _exercise(self, config_name: str) -> tuple[Any, Any, torch.Tensor, torch.Tensor]:
         config = load_config(REPOSITORY_ROOT / "examples" / config_name)
         solver = build_factory_object(config.solver, config)
         posterior = build_factory_object(config.posterior, config)

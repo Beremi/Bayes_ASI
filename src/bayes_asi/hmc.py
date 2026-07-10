@@ -7,8 +7,7 @@ import numpy as np
 import torch
 
 from bayes_asi.config import HMCConfig
-from bayes_asi.surrogate import SurrogateModel
-from bayes_asi.types import Posterior
+from bayes_asi.types import DifferentiableSurrogate, Posterior
 
 
 @dataclass(slots=True)
@@ -30,7 +29,7 @@ class HMCSampler:
         self,
         config: HMCConfig,
         posterior: Posterior,
-        surrogate: SurrogateModel,
+        surrogate: DifferentiableSurrogate,
         *,
         seed: int,
         device: str = "cpu",

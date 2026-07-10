@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import patch
 
 import numpy as np
 
@@ -87,12 +87,10 @@ hmc:
             config = self._config(Path(tmp) / "run", retry_seconds=60.0)
             coordinator = Coordinator(config, FakeComm())
             coordinator._import_initial_data()
-            coordinator.trainer.train = Mock(side_effect=RuntimeError("training failed"))
-
-            coordinator._maybe_train_surrogate()
-            coordinator._maybe_train_surrogate()
-
-            self.assertEqual(coordinator.trainer.train.call_count, 1)
+            with patch.object(coordinator.trainer, "train", side_effect=RuntimeError("training failed")) as train:
+                coordinator._maybe_train_surrogate()
+                coordinator._maybe_train_surrogate()
+                self.assertEqual(train.call_count, 1)
             failures = [
                 event for event in coordinator.store.read_events() if event["type"] == "surrogate_train_failed"
             ]
