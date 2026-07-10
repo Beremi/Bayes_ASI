@@ -75,6 +75,38 @@ class ActiveSelectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ActiveLearningConfig(queued_repulsion_radius_multiplier=0.0)
 
+    def test_non_finite_candidate_is_rejected(self) -> None:
+        selector = ActiveSelector(ActiveLearningConfig())
+        with self.assertRaisesRegex(ValueError, "finite"):
+            selector.select(
+                candidate_theta=np.array([[np.nan, 0.0]]),
+                candidate_log_prob=np.array([0.0]),
+                existing_theta=np.empty((0, 2)),
+                count=1,
+            )
+
+    def test_negative_infinite_log_probability_is_not_selected(self) -> None:
+        selector = ActiveSelector(ActiveLearningConfig(distance_weight=0.0, posterior_weight=1.0))
+        selected = selector.select(
+            candidate_theta=np.array([[0.0], [1.0], [2.0]]),
+            candidate_log_prob=np.array([-np.inf, -1.0, 0.0]),
+            existing_theta=np.empty((0, 1)),
+            count=2,
+        )
+        self.assertTrue(np.array_equal(selected.theta.reshape(-1), [2.0, 1.0]))
+
+    def test_chunked_minimum_distance_matches_direct_calculation(self) -> None:
+        rng = np.random.default_rng(12)
+        candidates = rng.normal(size=(20, 3))
+        existing = rng.normal(size=(75, 3))
+        scale = np.array([0.5, 2.0, 1.5])
+        expected = np.min(
+            np.linalg.norm((candidates[:, None, :] - existing[None, :, :]) / scale, axis=-1),
+            axis=1,
+        )
+        actual = ActiveSelector._min_distances(candidates, existing, scale)
+        self.assertTrue(np.allclose(actual, expected))
+
 
 if __name__ == "__main__":
     unittest.main()

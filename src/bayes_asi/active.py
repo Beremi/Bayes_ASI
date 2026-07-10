@@ -37,6 +37,8 @@ class ActiveSelector:
             raise ValueError("candidate_theta must be a 2D array")
         if candidate_theta.shape[0] != candidate_log_prob.shape[0]:
             raise ValueError("candidate theta/log probability length mismatch")
+        if not np.all(np.isfinite(candidate_theta)):
+            raise ValueError("candidate_theta must contain only finite values")
         if candidate_theta.shape[0] == 0 or count <= 0:
             return SelectedBatch(
                 theta=np.empty((0, candidate_theta.shape[1] if candidate_theta.ndim == 2 else 0)),
@@ -51,9 +53,20 @@ class ActiveSelector:
             if queued_theta is None
             else np.asarray(queued_theta, dtype=float).reshape(-1, candidate_theta.shape[1])
         )
+        if not np.all(np.isfinite(existing)) or not np.all(np.isfinite(queued)):
+            raise ValueError("existing_theta and queued_theta must contain only finite values")
         posterior_scale = np.std(candidate_theta, axis=0)
         posterior_scale[posterior_scale < 1e-9] = 1.0
         logp_z = self._zscore(candidate_log_prob)
+        completed_distances = self._min_distances(candidate_theta, existing, posterior_scale)
+        if queued.size:
+            queued_distances = self._min_distances(candidate_theta, queued, posterior_scale)
+            distances = np.minimum(
+                completed_distances,
+                queued_distances / self.config.queued_repulsion_radius_multiplier,
+            )
+        else:
+            distances = completed_distances
         available = np.ones(candidate_theta.shape[0], dtype=bool)
         selected_rows: list[np.ndarray] = []
         selected_scores: list[float] = []
@@ -63,9 +76,12 @@ class ActiveSelector:
             valid_indices = np.where(available)[0]
             if valid_indices.size == 0:
                 break
-            distances = self._effective_min_distances(candidate_theta, existing, queued, posterior_scale)
             distances_z = self._zscore(distances)
-            scores = self.config.posterior_weight * logp_z + self.config.distance_weight * distances_z
+            scores = np.zeros(candidate_theta.shape[0], dtype=float)
+            if self.config.posterior_weight > 0.0:
+                scores += self.config.posterior_weight * logp_z
+            if self.config.distance_weight > 0.0:
+                scores += self.config.distance_weight * distances_z
             scores[~available] = -np.inf
             for idx in valid_indices:
                 if stable_theta_key(candidate_theta[idx], self.config.duplicate_round_decimals) in known_keys:
@@ -80,7 +96,11 @@ class ActiveSelector:
             selected_distances.append(float(distances[best_index]))
             known_keys.add(key)
             available[best_index] = False
-            queued = np.vstack([queued, theta.reshape(1, -1)])
+            new_distances = np.linalg.norm((candidate_theta - theta) / posterior_scale, axis=1)
+            distances = np.minimum(
+                distances,
+                new_distances / self.config.queued_repulsion_radius_multiplier,
+            )
 
         if not selected_rows:
             return SelectedBatch(
@@ -97,37 +117,28 @@ class ActiveSelector:
     @staticmethod
     def _zscore(values: np.ndarray) -> np.ndarray:
         values = np.asarray(values, dtype=float)
-        mean = float(np.nanmean(values))
-        std = float(np.nanstd(values))
-        if not np.isfinite(std) or std < 1e-12:
-            return np.zeros_like(values)
-        z = (values - mean) / std
-        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+        finite = np.isfinite(values)
+        z = np.full_like(values, -np.inf)
+        if not np.any(finite):
+            return z
+        mean = float(np.mean(values[finite]))
+        std = float(np.std(values[finite]))
+        if std < 1e-12:
+            z[finite] = 0.0
+        else:
+            z[finite] = (values[finite] - mean) / std
+        return z
 
     @staticmethod
     def _min_distances(candidate_theta: np.ndarray, existing_theta: np.ndarray, scale: np.ndarray) -> np.ndarray:
         if existing_theta.size == 0:
             return np.ones(candidate_theta.shape[0], dtype=float)
-        return np.min(ActiveSelector._pairwise_distances(candidate_theta, existing_theta, scale), axis=1)
-
-    def _effective_min_distances(
-        self,
-        candidate_theta: np.ndarray,
-        existing_theta: np.ndarray,
-        queued_theta: np.ndarray,
-        scale: np.ndarray,
-    ) -> np.ndarray:
-        parts: list[np.ndarray] = []
-        if existing_theta.size:
-            parts.append(np.min(self._pairwise_distances(candidate_theta, existing_theta, scale), axis=1))
-        if queued_theta.size:
-            queued_distances = np.min(self._pairwise_distances(candidate_theta, queued_theta, scale), axis=1)
-            parts.append(queued_distances / self.config.queued_repulsion_radius_multiplier)
-        if not parts:
-            return np.ones(candidate_theta.shape[0], dtype=float)
-        return np.min(np.vstack(parts), axis=0)
-
-    @staticmethod
-    def _pairwise_distances(candidate_theta: np.ndarray, reference_theta: np.ndarray, scale: np.ndarray) -> np.ndarray:
-        diff = (candidate_theta[:, None, :] - reference_theta[None, :, :]) / scale.reshape(1, 1, -1)
-        return np.linalg.norm(diff, axis=-1)
+        result = np.full(candidate_theta.shape[0], np.inf, dtype=float)
+        max_pairs_per_chunk = 1_000_000
+        reference_chunk = max(1, max_pairs_per_chunk // max(candidate_theta.shape[0], 1))
+        scale_3d = scale.reshape(1, 1, -1)
+        for start in range(0, existing_theta.shape[0], reference_chunk):
+            reference = existing_theta[start : start + reference_chunk]
+            diff = (candidate_theta[:, None, :] - reference[None, :, :]) / scale_3d
+            result = np.minimum(result, np.min(np.linalg.norm(diff, axis=-1), axis=1))
+        return result

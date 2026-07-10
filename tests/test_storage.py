@@ -97,6 +97,21 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(queue.running_count, 1)
         self.assertIs(queue.running[1], running)
 
+    def test_worker_cannot_receive_two_running_jobs(self) -> None:
+        queue = QueueState()
+        queue.add_pending(Job(job_id="first", sequence=0, theta=np.array([1.0])))
+        queue.add_pending(Job(job_id="second", sequence=1, theta=np.array([2.0])))
+        queue.pop_for_worker(1)
+        with self.assertRaisesRegex(ValueError, "already has"):
+            queue.pop_for_worker(1)
+
+    def test_solve_time_validation(self) -> None:
+        queue = QueueState()
+        with self.assertRaisesRegex(ValueError, "elapsed_s"):
+            queue.update_solve_time(np.nan)
+        with self.assertRaisesRegex(ValueError, "alpha"):
+            queue.update_solve_time(1.0, alpha=0.0)
+
     def test_status_is_atomic_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)

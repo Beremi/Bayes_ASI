@@ -31,6 +31,8 @@ class QueueState:
         return jobs
 
     def pop_for_worker(self, worker_rank: int) -> Job | None:
+        if worker_rank in self.running:
+            raise ValueError(f"worker {worker_rank} already has a running job")
         if not self.pending:
             return None
         job = self.pending.popleft()
@@ -61,6 +63,10 @@ class QueueState:
         return np.vstack(rows) if rows else np.empty((0, 0))
 
     def update_solve_time(self, elapsed_s: float, alpha: float = 0.2) -> None:
+        if not np.isfinite(elapsed_s) or elapsed_s < 0.0:
+            raise ValueError("elapsed_s must be finite and non-negative")
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in (0, 1]")
         elapsed_s = float(max(elapsed_s, 1e-9))
         if self.solve_time_ewma is None:
             self.solve_time_ewma = elapsed_s
