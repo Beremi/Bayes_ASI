@@ -25,6 +25,16 @@ _COMPLETED_DATASETS = (
 )
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
 def now_seconds() -> float:
     return time.time()
 
@@ -206,7 +216,7 @@ class HDF5Store:
         if not event_type:
             raise ValueError("event_type must not be empty")
         event = {**payload, "time": now_seconds(), "type": event_type}
-        line = json.dumps(event, sort_keys=True, allow_nan=False) + "\n"
+        line = json.dumps(event, sort_keys=True, allow_nan=False, default=_json_default) + "\n"
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
@@ -239,7 +249,7 @@ class HDF5Store:
         status = {**status, "time": now_seconds()}
         tmp_path = self.status_path.with_suffix(".json.tmp")
         with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(status, handle, indent=2, sort_keys=True, allow_nan=False)
+            json.dump(status, handle, indent=2, sort_keys=True, allow_nan=False, default=_json_default)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())

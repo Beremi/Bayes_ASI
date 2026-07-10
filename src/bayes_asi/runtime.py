@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 import traceback
 from pathlib import Path
@@ -12,7 +13,7 @@ from mpi4py import MPI
 
 from bayes_asi.active import ActiveSelector
 from bayes_asi.config import AppConfig, build_factory_object, load_config
-from bayes_asi.hmc import HMCSampler
+from bayes_asi.hmc import HMCResult, HMCSampler
 from bayes_asi.queue import Job, QueueState
 from bayes_asi.storage import HDF5Store, replay_queue_events, stable_theta_key
 from bayes_asi.surrogate import SurrogateModel, SurrogateTrainer
@@ -26,11 +27,16 @@ TAG_RESULT = 12
 def run_mpi(config_path: str | Path) -> None:
     config = load_config(config_path)
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    if rank == 0:
-        Coordinator(config, comm).run()
-    else:
-        worker_loop(config, comm)
+    try:
+        rank = comm.Get_rank()
+        if rank == 0:
+            Coordinator(config, comm).run()
+        else:
+            worker_loop(config, comm)
+    except BaseException:
+        if comm.Get_size() > 1:
+            comm.Abort(1)
+        raise
 
 
 class Coordinator:
@@ -58,6 +64,9 @@ class Coordinator:
         self.surrogate_version = 0
         self.training_cycle = 0
         self.completed_at_last_train = 0
+        self.completed_count = 0
+        self.next_training_attempt_at = 0.0
+        self.next_active_attempt_at = 0.0
         self.last_hmc_z: np.ndarray | None = None
         self.next_sequence = 0
         self.known_keys: set[tuple[float, ...]] = set()
@@ -91,7 +100,7 @@ class Coordinator:
                     self.store.append_event(
                         "budget_reached",
                         {
-                            "completed_count": self.store.load_completed().n,
+                            "completed_count": self.completed_count,
                             "pending_count": self.queue.pending_count,
                             "running_count": self.queue.running_count,
                             "drain_running_on_exit": self.config.run.drain_running_on_exit,
@@ -111,7 +120,7 @@ class Coordinator:
                 self.store.append_event(
                     "run_stopped_at_budget",
                     {
-                        "completed_count": self.store.load_completed().n,
+                        "completed_count": self.completed_count,
                         "pending_count": self.queue.pending_count,
                         "running_count": self.queue.running_count,
                     },
@@ -128,7 +137,7 @@ class Coordinator:
 
         self._stop_workers()
         self._write_status(deadline, True, final=True)
-        self.store.append_event("run_finished", {"completed_count": self.store.load_completed().n})
+        self.store.append_event("run_finished", {"completed_count": self.completed_count})
 
     def _import_initial_data(self) -> None:
         if self.config.initial_data is None:
@@ -138,11 +147,15 @@ class Coordinator:
             initial = loader()
         else:
             initial = loader
+        if not isinstance(initial, dict):
+            raise TypeError("initial_data factory must return a mapping or a callable returning one")
         theta = np.asarray(initial["theta"], dtype=float).reshape(-1, self.config.problem.parameter_dim)
         outputs = np.asarray(initial["outputs"], dtype=float).reshape(-1, self.config.problem.output_dim)
         if theta.shape[0] != outputs.shape[0]:
             raise ValueError("initial_data theta and outputs row counts differ")
-        imported = 0
+        rows: list[np.ndarray] = []
+        output_rows: list[np.ndarray] = []
+        sequences: list[int] = []
         skipped = 0
         for i, row in enumerate(theta):
             key = stable_theta_key(row, self.config.active_learning.duplicate_round_decimals)
@@ -151,25 +164,34 @@ class Coordinator:
                 continue
             sequence = self.next_sequence
             self.next_sequence += 1
-            index = self.store.append_completed(
-                theta=row,
-                outputs=outputs[i],
-                elapsed_s=0.0,
-                worker_rank=-1,
-                job_sequence=sequence,
-                started_at=0.0,
-                finished_at=0.0,
-            )
             self.known_keys.add(key)
-            imported += 1
+            rows.append(row)
+            output_rows.append(outputs[i])
+            sequences.append(sequence)
+
+        imported = len(rows)
+        first_index = self.completed_count
+        if imported:
+            first_index = self.store.append_completed_batch(
+                theta=np.vstack(rows),
+                outputs=np.vstack(output_rows),
+                elapsed_s=np.zeros(imported),
+                worker_rank=np.full(imported, -1, dtype=np.int64),
+                job_sequence=np.asarray(sequences, dtype=np.int64),
+                started_at=np.zeros(imported),
+                finished_at=np.zeros(imported),
+            )
+            self.completed_count += imported
+        metadata = initial.get("metadata", {})
+        for offset, (row, sequence) in enumerate(zip(rows, sequences, strict=True)):
             self.store.append_event(
                 "initial_sample_imported",
                 {
                     "job_id": f"initial_{sequence:08d}",
                     "job_sequence": sequence,
-                    "hdf5_index": index,
+                    "hdf5_index": first_index + offset,
                     "theta": row.tolist(),
-                    "metadata": initial.get("metadata", {}),
+                    "metadata": metadata,
                 },
             )
         self.store.append_event(
@@ -178,30 +200,53 @@ class Coordinator:
                 "rows": int(theta.shape[0]),
                 "imported": imported,
                 "skipped_existing": skipped,
-                "metadata": initial.get("metadata", {}),
+                "metadata": metadata,
             },
         )
 
     def _restore_state(self) -> None:
         completed = self.store.load_completed()
+        self.completed_count = completed.n
         self.known_keys = {
             stable_theta_key(row, self.config.active_learning.duplicate_round_decimals)
             for row in completed.theta
         }
         events = self.store.read_events()
-        checkpoint = self.store.latest_checkpoint()
-        if checkpoint is not None:
-            self.surrogate = SurrogateModel.load(checkpoint, device=self.trainer.device)
-            self.surrogate_version = self.surrogate.version
-            self.completed_at_last_train = completed.n
-            self.store.append_event("surrogate_loaded", {"path": str(checkpoint), "version": self.surrogate_version})
+        for checkpoint in self.store.checkpoint_paths(newest_first=True):
+            try:
+                candidate = SurrogateModel.load(checkpoint, device=self.trainer.device)
+                if candidate.parameter_dim != self.config.problem.parameter_dim:
+                    raise ValueError("checkpoint parameter dimension does not match the configuration")
+                if candidate.output_dim != self.config.problem.output_dim:
+                    raise ValueError("checkpoint output dimension does not match the configuration")
+                if candidate.training_samples is not None and candidate.training_samples > completed.n:
+                    raise ValueError("checkpoint was trained with more samples than are stored")
+            except Exception as exc:
+                self.store.append_event(
+                    "surrogate_checkpoint_load_failed",
+                    {"path": str(checkpoint), "error": str(exc)},
+                )
+                continue
+            self.surrogate = candidate
+            self.surrogate_version = candidate.version
+            self.training_cycle = candidate.version
+            self.completed_at_last_train = candidate.training_samples or 0
+            self.store.append_event(
+                "surrogate_loaded",
+                {
+                    "path": str(checkpoint),
+                    "version": self.surrogate_version,
+                    "training_samples": candidate.training_samples,
+                },
+            )
+            break
 
         pending = replay_queue_events(
             events,
             self.known_keys,
             decimals=self.config.active_learning.duplicate_round_decimals,
         )
-        max_sequence = -1
+        max_sequence = int(np.max(completed.job_sequence)) if completed.job_sequence.size else -1
         for event in events:
             if "job_sequence" in event:
                 max_sequence = max(max_sequence, int(event["job_sequence"]))
@@ -250,9 +295,8 @@ class Coordinator:
             )
 
     def _ensure_initial_design(self) -> None:
-        completed = self.store.load_completed()
         target = self.config.initial_design.n_points
-        missing = target - completed.n - self.queue.in_system_count
+        missing = target - self.completed_count - self.queue.in_system_count
         if missing <= 0:
             return
         theta = self._draw_initial_theta(missing)
@@ -261,9 +305,17 @@ class Coordinator:
 
     def _draw_initial_theta(self, n: int) -> np.ndarray:
         z = self.posterior.initial_z(self.rng, n)
+        z = np.asarray(z, dtype=np.float32)
+        if z.shape != (n, self.config.problem.latent_dim) or not np.all(np.isfinite(z)):
+            raise ValueError(
+                f"posterior.initial_z must return finite shape {(n, self.config.problem.latent_dim)}, got {z.shape}"
+            )
         with torch.no_grad():
-            theta = self.posterior.z_to_theta(torch.as_tensor(z, dtype=torch.float32, device=self.trainer.device))
-        return theta.detach().cpu().numpy().reshape(n, self.config.problem.parameter_dim)
+            theta = self.posterior.z_to_theta(torch.as_tensor(z, device=self.trainer.device))
+        theta_np = theta.detach().cpu().numpy().reshape(n, self.config.problem.parameter_dim)
+        if not np.all(np.isfinite(theta_np)):
+            raise ValueError("posterior.z_to_theta returned non-finite initial parameters")
+        return theta_np
 
     @staticmethod
     def _source_surrogate_version(source: str) -> int | None:
@@ -277,6 +329,8 @@ class Coordinator:
 
     def _queue_theta(self, theta: np.ndarray, *, source: str, attempt: int = 0) -> Job | None:
         theta = np.asarray(theta, dtype=float).reshape(self.config.problem.parameter_dim)
+        if not np.all(np.isfinite(theta)):
+            raise ValueError("cannot queue non-finite parameters")
         key = stable_theta_key(theta, self.config.active_learning.duplicate_round_decimals)
         if key in self.known_keys:
             return None
@@ -401,6 +455,8 @@ class Coordinator:
                 started_at=float(result.get("started_at", time.time())),
                 finished_at=float(result.get("finished_at", time.time())),
             )
+            self.completed_count += 1
+            self.next_training_attempt_at = 0.0
             self.store.append_event(
                 "job_completed",
                 {
@@ -440,12 +496,16 @@ class Coordinator:
                 self.queue.add_pending(retry)
 
     def _maybe_train_surrogate(self) -> None:
-        completed = self.store.load_completed()
-        if completed.n < self.config.surrogate.min_train_samples:
+        if self.completed_count < self.config.surrogate.min_train_samples:
             return
-        new_since_train = completed.n - self.completed_at_last_train
+        new_since_train = self.completed_count - self.completed_at_last_train
         if self.surrogate is not None and new_since_train < self.config.surrogate.update_after_new_samples:
             return
+        now = time.monotonic()
+        if now < self.next_training_attempt_at:
+            return
+
+        completed = self.store.load_completed()
 
         previous_surrogate_version = self.surrogate_version
         previous_completed_at_last_train = self.completed_at_last_train
@@ -481,6 +541,7 @@ class Coordinator:
             self.surrogate_version = version
             self.training_cycle += 1
             self.completed_at_last_train = completed.n
+            self.next_training_attempt_at = 0.0
             self.store.append_event(
                 "surrogate_trained",
                 {
@@ -490,6 +551,7 @@ class Coordinator:
                     "train_loss": chosen.train_loss,
                     "val_loss": chosen.val_loss,
                     "epochs": chosen.epochs,
+                    "best_epoch": chosen.best_epoch,
                     "trained_from_scratch": chosen.trained_from_scratch,
                 },
             )
@@ -500,9 +562,15 @@ class Coordinator:
                     completed_count=completed.n,
                 )
         except Exception as exc:
+            self.next_training_attempt_at = now + self.config.surrogate.failure_retry_seconds
             self.store.append_event(
                 "surrogate_train_failed",
-                {"error": str(exc), "traceback": traceback.format_exc(), "completed_count": completed.n},
+                {
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "completed_count": completed.n,
+                    "retry_after_seconds": self.config.surrogate.failure_retry_seconds,
+                },
             )
 
     def _maybe_refill_active_queue(self) -> None:
@@ -515,6 +583,9 @@ class Coordinator:
         desired = self._desired_in_system_count()
         count = min(self.config.active_learning.batch_max_size, max(0, desired - self.queue.in_system_count))
         if count <= 0:
+            return
+        now = time.monotonic()
+        if now < self.next_active_attempt_at:
             return
         completed = self.store.load_completed()
         queued_parts = []
@@ -546,6 +617,10 @@ class Coordinator:
             )
             for row in selected.theta:
                 self._queue_theta(row, source=f"surrogate_v{self.surrogate_version}")
+            if selected.theta.shape[0] == 0:
+                self.next_active_attempt_at = now + self.config.active_learning.failure_retry_seconds
+            else:
+                self.next_active_attempt_at = 0.0
             self.store.append_event(
                 "active_batch_selected",
                 {
@@ -553,6 +628,7 @@ class Coordinator:
                     "requested": count,
                     "selected": int(selected.theta.shape[0]),
                     "hmc_accept_rate": hmc_result.accept_rate,
+                    "hmc_warmup_accept_rate": hmc_result.warmup_accept_rate,
                     "hmc_step_size": hmc_result.step_size,
                     "hmc_leapfrog_steps": hmc_result.leapfrog_steps,
                     "posterior_batch_path": str(posterior_path),
@@ -561,15 +637,22 @@ class Coordinator:
                 },
             )
         except Exception as exc:
+            self.next_active_attempt_at = now + self.config.active_learning.failure_retry_seconds
             self.store.append_event(
                 "active_selection_failed",
-                {"error": str(exc), "traceback": traceback.format_exc(), "surrogate_version": self.surrogate_version},
+                {
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "surrogate_version": self.surrogate_version,
+                    "retry_after_seconds": self.config.active_learning.failure_retry_seconds,
+                },
             )
 
-    def _draw_surrogate_posterior(self):
+    def _draw_surrogate_posterior(self) -> HMCResult:
         if self.surrogate is None:
             raise RuntimeError("surrogate is not available")
-        if self.last_hmc_z is None or self.last_hmc_z.shape != (self.config.hmc.n_chains, self.config.problem.latent_dim):
+        expected_shape = (self.config.hmc.n_chains, self.config.problem.latent_dim)
+        if self.last_hmc_z is None or self.last_hmc_z.shape != expected_shape:
             initial_z = self.posterior.initial_z(self.rng, self.config.hmc.n_chains)
         else:
             initial_z = self.last_hmc_z
@@ -584,21 +667,24 @@ class Coordinator:
         self.last_hmc_z = result.z[-self.config.hmc.n_chains :].copy()
         return result
 
-    def _save_hmc_batch(self, hmc_result) -> Path:
+    def _save_hmc_batch(self, hmc_result: HMCResult) -> Path:
         batch_dir = self.config.run.output_dir / "posterior_batches"
         batch_dir.mkdir(parents=True, exist_ok=True)
-        path = batch_dir / f"surrogate_v{self.surrogate_version:04d}_batch_{int(time.time() * 1000)}.npz"
+        path = batch_dir / f"surrogate_v{self.surrogate_version:04d}_batch_{time.time_ns()}.npz"
+        temporary = path.with_suffix(".tmp.npz")
         np.savez_compressed(
-            path,
+            temporary,
             z=hmc_result.z,
             theta=hmc_result.theta,
             log_prob=hmc_result.log_prob,
             accept_rate=np.asarray([hmc_result.accept_rate], dtype=float),
+            warmup_accept_rate=np.asarray([hmc_result.warmup_accept_rate], dtype=float),
             step_size=np.asarray([hmc_result.step_size], dtype=float),
             leapfrog_steps=np.asarray([hmc_result.leapfrog_steps], dtype=int),
             mass_diag=hmc_result.mass_diag,
             surrogate_version=np.asarray([self.surrogate_version], dtype=int),
         )
+        os.replace(temporary, path)
         return path
 
     def _desired_in_system_count(self) -> int:
@@ -613,10 +699,9 @@ class Coordinator:
         return self.worker_count + ahead
 
     def _write_status(self, deadline: float, stop_queueing: bool, final: bool = False) -> None:
-        completed = self.store.load_completed()
         status = {
             "final": final,
-            "completed_count": completed.n,
+            "completed_count": self.completed_count,
             "pending_count": self.queue.pending_count,
             "running_count": self.queue.running_count,
             "idle_workers": len(self.available_workers),
@@ -626,6 +711,7 @@ class Coordinator:
             "solve_time_ewma_s": self.queue.solve_time_ewma,
             "surrogate_version": self.surrogate_version if self.surrogate is not None else None,
             "surrogate_val_loss": self.surrogate.val_loss if self.surrogate is not None else None,
+            "surrogate_training_samples": self.surrogate.training_samples if self.surrogate is not None else None,
         }
         self.store.update_status(status)
 
@@ -658,6 +744,8 @@ def _evaluate_worker_job(
 ) -> dict[str, Any]:
     job_id = str(payload["job_id"])
     theta = np.asarray(payload["theta"], dtype=float).reshape(config.problem.parameter_dim)
+    if not np.all(np.isfinite(theta)):
+        raise ValueError("worker received non-finite parameters")
     started_at = time.time()
     work_dir = run_dir / "workers" / f"rank_{rank}" / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -675,6 +763,8 @@ def _evaluate_worker_job(
         else:
             forward_result = ForwardResult(outputs=np.asarray(raw, dtype=float))
         outputs = np.asarray(forward_result.outputs, dtype=float).reshape(config.problem.output_dim)
+        if not np.all(np.isfinite(outputs)):
+            raise ValueError("solver returned non-finite outputs")
         finished_at = time.time()
         return {
             "ok": True,

@@ -148,6 +148,18 @@ class StorageTests(unittest.TestCase):
                 (store.checkpoints_dir / name).touch()
             self.assertEqual(store.latest_checkpoint().name, "surrogate_v10.pt")
 
+    def test_event_payload_supports_common_numpy_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
+            store.append_event(
+                "metadata",
+                {"scalar": np.int64(3), "array": np.array([1.0, 2.0]), "path": Path("result.out")},
+            )
+            event = store.read_events()[0]
+            self.assertEqual(event["scalar"], 3)
+            self.assertEqual(event["array"], [1.0, 2.0])
+            self.assertEqual(event["path"], "result.out")
+
 
 if __name__ == "__main__":
     unittest.main()

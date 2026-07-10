@@ -51,6 +51,8 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_numeric_ranges_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "validation_fraction"):
             SurrogateConfig(validation_fraction=1.0)
+        with self.assertRaisesRegex(ValueError, "failure_retry_seconds"):
+            SurrogateConfig(failure_retry_seconds=-1.0)
         with self.assertRaisesRegex(ValueError, "leapfrog"):
             HMCConfig(min_leapfrog_steps=5, max_leapfrog_steps=4)
         with self.assertRaisesRegex(ValueError, "max_pending"):

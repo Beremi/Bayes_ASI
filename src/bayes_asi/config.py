@@ -145,6 +145,7 @@ class SurrogateConfig:
     scratch_improvement_rel: float = 0.02
     device: str = "cpu"
     gradient_epsilon: float = 1e-6
+    failure_retry_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if any(width <= 0 for width in self.hidden_layers):
@@ -173,6 +174,8 @@ class SurrogateConfig:
             raise ValueError("surrogate.device must not be empty")
         if self.gradient_epsilon <= 0.0:
             raise ValueError("surrogate.gradient_epsilon must be positive")
+        if self.failure_retry_seconds < 0.0:
+            raise ValueError("surrogate.failure_retry_seconds must be non-negative")
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "SurrogateConfig":
@@ -194,6 +197,7 @@ class SurrogateConfig:
             scratch_improvement_rel=float(_get(data, "scratch_improvement_rel", 0.02)),
             device=str(_get(data, "device", "cpu")),
             gradient_epsilon=float(_get(data, "gradient_epsilon", 1e-6)),
+            failure_retry_seconds=float(_get(data, "failure_retry_seconds", 30.0)),
         )
 
 
@@ -252,6 +256,7 @@ class ActiveLearningConfig:
     distance_weight: float = 0.6
     queued_repulsion_radius_multiplier: float = 2.0
     duplicate_round_decimals: int = 12
+    failure_retry_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if self.candidate_pool_size <= 0 or self.batch_max_size <= 0:
@@ -264,6 +269,8 @@ class ActiveLearningConfig:
             raise ValueError("active_learning.queued_repulsion_radius_multiplier must be positive")
         if self.duplicate_round_decimals < 0:
             raise ValueError("active_learning.duplicate_round_decimals must be non-negative")
+        if self.failure_retry_seconds < 0.0:
+            raise ValueError("active_learning.failure_retry_seconds must be non-negative")
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ActiveLearningConfig":
@@ -276,6 +283,7 @@ class ActiveLearningConfig:
             distance_weight=float(_get(data, "distance_weight", 0.6)),
             queued_repulsion_radius_multiplier=float(_get(data, "queued_repulsion_radius_multiplier", 2.0)),
             duplicate_round_decimals=int(_get(data, "duplicate_round_decimals", 12)),
+            failure_retry_seconds=float(_get(data, "failure_retry_seconds", 5.0)),
         )
 
 
