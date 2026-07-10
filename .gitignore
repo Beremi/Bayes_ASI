@@ -8,6 +8,6 @@ __pycache__/
 dist/
 build/
 runs/
+run_analysis_*/
 *.h5
 *.log
-

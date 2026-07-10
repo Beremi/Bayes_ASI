@@ -14,6 +14,13 @@ The first implementation uses:
 - A tanh MLP surrogate with input/output normalization and input gradients.
 - Custom PyTorch HMC with dual-averaged step-size warmup.
 
+## Package Boundary
+
+`bayes-asi` contains only the reusable inversion engine, callback protocols,
+storage, active selection, surrogate training, HMC sampling, CLI, and a small
+synthetic example. Concrete scientific problems should live in separate
+packages that expose solver and posterior factories referenced from YAML.
+
 ## Quick Start
 
 From this repository:
@@ -30,6 +37,12 @@ For local development without installing:
 ```bash
 PYTHONPATH=src mpiexec -n 3 python3 -m bayes_asi.cli run examples/synthetic.yaml
 PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+To connect a problem package without installing either package:
+
+```bash
+PYTHONPATH=/path/to/Bayes_ASI/src:/path/to/problem/src bayes-asi run problem.yaml
 ```
 
 ## Runtime Model
@@ -75,4 +88,3 @@ log_likelihood(theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor
 
 `z` is the unconstrained latent variable used by HMC. `theta` is the physical
 parameter vector sent to the black-box solver.
-

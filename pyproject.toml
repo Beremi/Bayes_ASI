@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayes-asi"
-version = "0.1.0"
-description = "Adaptive surrogate Bayesian inversion with MPI solver workers"
+version = "0.2.0"
+description = "Problem-agnostic adaptive surrogate Bayesian inversion with MPI solver workers"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,10 +15,15 @@ dependencies = [
   "pyyaml",
   "torch",
 ]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+]
 
 [project.scripts]
 bayes-asi = "bayes_asi.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
