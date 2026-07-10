@@ -33,7 +33,48 @@ class ActiveSelectorTests(unittest.TestCase):
         self.assertEqual(selected.theta.shape, (2, 2))
         self.assertTrue(any(np.allclose(row, [-5.0, 0.0]) for row in selected.theta))
 
+    def test_queued_samples_have_larger_repulsion_radius(self) -> None:
+        selector = ActiveSelector(
+            ActiveLearningConfig(
+                distance_weight=1.0,
+                posterior_weight=0.0,
+                queued_repulsion_radius_multiplier=2.0,
+            )
+        )
+        candidates = np.array([[0.2, 0.0], [2.2, 0.0]])
+        selected = selector.select(
+            candidate_theta=candidates,
+            candidate_log_prob=np.zeros(2),
+            existing_theta=np.array([[0.0, 0.0]]),
+            queued_theta=np.array([[2.0, 0.0]]),
+            count=1,
+        )
+        self.assertEqual(selected.theta.shape, (1, 2))
+        self.assertTrue(np.allclose(selected.theta[0], [0.2, 0.0]))
+
+    def test_greedy_selection_treats_new_rows_as_queued(self) -> None:
+        selector = ActiveSelector(
+            ActiveLearningConfig(
+                distance_weight=1.0,
+                posterior_weight=0.0,
+                queued_repulsion_radius_multiplier=2.0,
+            )
+        )
+        candidates = np.array([[16.0, 0.0], [10.0, 0.0], [-5.0, 0.0]])
+        selected = selector.select(
+            candidate_theta=candidates,
+            candidate_log_prob=np.zeros(3),
+            existing_theta=np.array([[0.0, 0.0]]),
+            count=2,
+        )
+        self.assertEqual(selected.theta.shape, (2, 2))
+        self.assertTrue(np.allclose(selected.theta[0], [16.0, 0.0]))
+        self.assertTrue(np.allclose(selected.theta[1], [-5.0, 0.0]))
+
+    def test_queued_repulsion_multiplier_must_be_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            ActiveLearningConfig(queued_repulsion_radius_multiplier=0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
-

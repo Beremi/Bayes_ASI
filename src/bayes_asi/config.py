@@ -151,7 +151,12 @@ class ActiveLearningConfig:
     batch_max_size: int = 8
     posterior_weight: float = 1.0
     distance_weight: float = 0.6
+    queued_repulsion_radius_multiplier: float = 2.0
     duplicate_round_decimals: int = 12
+
+    def __post_init__(self) -> None:
+        if self.queued_repulsion_radius_multiplier <= 0.0:
+            raise ValueError("active_learning.queued_repulsion_radius_multiplier must be positive")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ActiveLearningConfig":
@@ -160,6 +165,7 @@ class ActiveLearningConfig:
             batch_max_size=int(_get(data, "batch_max_size", 8)),
             posterior_weight=float(_get(data, "posterior_weight", 1.0)),
             distance_weight=float(_get(data, "distance_weight", 0.6)),
+            queued_repulsion_radius_multiplier=float(_get(data, "queued_repulsion_radius_multiplier", 2.0)),
             duplicate_round_decimals=int(_get(data, "duplicate_round_decimals", 12)),
         )
 

@@ -181,6 +181,8 @@ def replay_queue_events(
             }
         elif event_type == "job_completed":
             terminal.add(job_id)
+        elif event_type == "job_cancelled":
+            terminal.add(job_id)
         elif event_type == "job_failed" and int(event.get("will_retry", 0)) == 0:
             terminal.add(job_id)
     pending: list[dict[str, Any]] = []

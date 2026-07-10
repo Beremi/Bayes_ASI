@@ -27,6 +27,7 @@ class ActiveSelector:
         candidate_theta: np.ndarray,
         candidate_log_prob: np.ndarray,
         existing_theta: np.ndarray,
+        queued_theta: np.ndarray | None = None,
         count: int,
         known_keys: set[tuple[float, ...]] | None = None,
     ) -> SelectedBatch:
@@ -45,6 +46,11 @@ class ActiveSelector:
 
         known_keys = set() if known_keys is None else set(known_keys)
         existing = np.asarray(existing_theta, dtype=float).reshape(-1, candidate_theta.shape[1])
+        queued = (
+            np.empty((0, candidate_theta.shape[1]), dtype=float)
+            if queued_theta is None
+            else np.asarray(queued_theta, dtype=float).reshape(-1, candidate_theta.shape[1])
+        )
         posterior_scale = np.std(candidate_theta, axis=0)
         posterior_scale[posterior_scale < 1e-9] = 1.0
         logp_z = self._zscore(candidate_log_prob)
@@ -57,7 +63,7 @@ class ActiveSelector:
             valid_indices = np.where(available)[0]
             if valid_indices.size == 0:
                 break
-            distances = self._min_distances(candidate_theta, existing, posterior_scale)
+            distances = self._effective_min_distances(candidate_theta, existing, queued, posterior_scale)
             distances_z = self._zscore(distances)
             scores = self.config.posterior_weight * logp_z + self.config.distance_weight * distances_z
             scores[~available] = -np.inf
@@ -74,7 +80,7 @@ class ActiveSelector:
             selected_distances.append(float(distances[best_index]))
             known_keys.add(key)
             available[best_index] = False
-            existing = np.vstack([existing, theta.reshape(1, -1)])
+            queued = np.vstack([queued, theta.reshape(1, -1)])
 
         if not selected_rows:
             return SelectedBatch(
@@ -102,7 +108,26 @@ class ActiveSelector:
     def _min_distances(candidate_theta: np.ndarray, existing_theta: np.ndarray, scale: np.ndarray) -> np.ndarray:
         if existing_theta.size == 0:
             return np.ones(candidate_theta.shape[0], dtype=float)
-        diff = (candidate_theta[:, None, :] - existing_theta[None, :, :]) / scale.reshape(1, 1, -1)
-        distances = np.linalg.norm(diff, axis=-1)
-        return np.min(distances, axis=1)
+        return np.min(ActiveSelector._pairwise_distances(candidate_theta, existing_theta, scale), axis=1)
 
+    def _effective_min_distances(
+        self,
+        candidate_theta: np.ndarray,
+        existing_theta: np.ndarray,
+        queued_theta: np.ndarray,
+        scale: np.ndarray,
+    ) -> np.ndarray:
+        parts: list[np.ndarray] = []
+        if existing_theta.size:
+            parts.append(np.min(self._pairwise_distances(candidate_theta, existing_theta, scale), axis=1))
+        if queued_theta.size:
+            queued_distances = np.min(self._pairwise_distances(candidate_theta, queued_theta, scale), axis=1)
+            parts.append(queued_distances / self.config.queued_repulsion_radius_multiplier)
+        if not parts:
+            return np.ones(candidate_theta.shape[0], dtype=float)
+        return np.min(np.vstack(parts), axis=0)
+
+    @staticmethod
+    def _pairwise_distances(candidate_theta: np.ndarray, reference_theta: np.ndarray, scale: np.ndarray) -> np.ndarray:
+        diff = (candidate_theta[:, None, :] - reference_theta[None, :, :]) / scale.reshape(1, 1, -1)
+        return np.linalg.norm(diff, axis=-1)

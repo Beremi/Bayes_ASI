@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from bayes_asi.queue import Job, QueueState
 from bayes_asi.storage import HDF5Store, replay_queue_events, stable_theta_key
 
 
@@ -43,6 +44,42 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0]["job_id"], "job_00000001")
 
+    def test_cancelled_jobs_are_not_replayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=2, output_dim=1)
+            store.append_event(
+                "job_queued",
+                {
+                    "job_id": "job_00000000",
+                    "job_sequence": 0,
+                    "theta": [1.0, 2.0],
+                    "attempt": 0,
+                    "source": "surrogate_v1",
+                },
+            )
+            store.append_event(
+                "job_cancelled",
+                {"job_id": "job_00000000", "job_sequence": 0, "reason": "new_surrogate_trained"},
+            )
+            pending = replay_queue_events(store.read_events(), set())
+            self.assertEqual(pending, [])
+
+    def test_clear_pending_preserves_running_jobs(self) -> None:
+        queue = QueueState()
+        first = Job(job_id="job_00000000", sequence=0, theta=np.array([1.0, 2.0]))
+        second = Job(job_id="job_00000001", sequence=1, theta=np.array([3.0, 4.0]))
+        running = Job(job_id="job_00000002", sequence=2, theta=np.array([5.0, 6.0]))
+        queue.add_pending(first)
+        queue.add_pending(second)
+        queue.running[1] = running
+
+        cleared = queue.clear_pending()
+
+        self.assertEqual([job.job_id for job in cleared], ["job_00000000", "job_00000001"])
+        self.assertEqual(queue.pending_count, 0)
+        self.assertEqual(queue.running_count, 1)
+        self.assertIs(queue.running[1], running)
+
     def test_status_is_atomic_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
@@ -53,4 +90,3 @@ class StorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -25,6 +25,11 @@ class QueueState:
     def add_pending(self, job: Job) -> None:
         self.pending.append(job)
 
+    def clear_pending(self) -> list[Job]:
+        jobs = list(self.pending)
+        self.pending.clear()
+        return jobs
+
     def pop_for_worker(self, worker_rank: int) -> Job | None:
         if not self.pending:
             return None
@@ -61,4 +66,3 @@ class QueueState:
             self.solve_time_ewma = elapsed_s
         else:
             self.solve_time_ewma = alpha * elapsed_s + (1.0 - alpha) * self.solve_time_ewma
-

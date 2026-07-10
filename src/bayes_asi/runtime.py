@@ -189,6 +189,13 @@ class Coordinator:
             for row in completed.theta
         }
         events = self.store.read_events()
+        checkpoint = self.store.latest_checkpoint()
+        if checkpoint is not None:
+            self.surrogate = SurrogateModel.load(checkpoint, device=self.trainer.device)
+            self.surrogate_version = self.surrogate.version
+            self.completed_at_last_train = completed.n
+            self.store.append_event("surrogate_loaded", {"path": str(checkpoint), "version": self.surrogate_version})
+
         pending = replay_queue_events(
             events,
             self.known_keys,
@@ -198,27 +205,49 @@ class Coordinator:
         for event in events:
             if "job_sequence" in event:
                 max_sequence = max(max_sequence, int(event["job_sequence"]))
+        stale_jobs: list[dict[str, Any]] = []
         for job_data in pending:
             sequence = int(job_data.get("sequence", max_sequence + 1))
             max_sequence = max(max_sequence, sequence)
+            source = str(job_data.get("source", "replayed"))
+            source_version = self._source_surrogate_version(source)
+            if self.surrogate_version > 0 and source_version is not None and source_version < self.surrogate_version:
+                stale_jobs.append({"job_id": str(job_data["job_id"]), "sequence": sequence})
+                self.store.append_event(
+                    "job_cancelled",
+                    {
+                        "job_id": str(job_data["job_id"]),
+                        "job_sequence": sequence,
+                        "theta": np.asarray(job_data["theta"], dtype=float).tolist(),
+                        "attempt": int(job_data.get("attempt", 0)),
+                        "source": source,
+                        "reason": "stale_surrogate_on_restore",
+                        "surrogate_version": self.surrogate_version,
+                    },
+                )
+                continue
             job = Job(
                 job_id=str(job_data["job_id"]),
                 sequence=sequence,
                 theta=np.asarray(job_data["theta"], dtype=float),
                 attempt=int(job_data.get("attempt", 0)),
-                source=str(job_data.get("source", "replayed")),
+                source=source,
                 queued_at=time.time(),
             )
             self.queue.add_pending(job)
             self.known_keys.add(stable_theta_key(job.theta, self.config.active_learning.duplicate_round_decimals))
         self.next_sequence = max_sequence + 1
-
-        checkpoint = self.store.latest_checkpoint()
-        if checkpoint is not None:
-            self.surrogate = SurrogateModel.load(checkpoint, device=self.trainer.device)
-            self.surrogate_version = self.surrogate.version
-            self.completed_at_last_train = completed.n
-            self.store.append_event("surrogate_loaded", {"path": str(checkpoint), "version": self.surrogate_version})
+        if stale_jobs:
+            self.store.append_event(
+                "queue_pending_cleared",
+                {
+                    "reason": "stale_surrogate_on_restore",
+                    "surrogate_version": self.surrogate_version,
+                    "cancelled_count": len(stale_jobs),
+                    "job_ids": [str(job["job_id"]) for job in stale_jobs],
+                    "job_sequences": [int(job["sequence"]) for job in stale_jobs],
+                },
+            )
 
     def _ensure_initial_design(self) -> None:
         completed = self.store.load_completed()
@@ -235,6 +264,16 @@ class Coordinator:
         with torch.no_grad():
             theta = self.posterior.z_to_theta(torch.as_tensor(z, dtype=torch.float32, device=self.trainer.device))
         return theta.detach().cpu().numpy().reshape(n, self.config.problem.parameter_dim)
+
+    @staticmethod
+    def _source_surrogate_version(source: str) -> int | None:
+        prefix = "surrogate_v"
+        if not source.startswith(prefix):
+            return None
+        try:
+            return int(source[len(prefix) :])
+        except ValueError:
+            return None
 
     def _queue_theta(self, theta: np.ndarray, *, source: str, attempt: int = 0) -> Job | None:
         theta = np.asarray(theta, dtype=float).reshape(self.config.problem.parameter_dim)
@@ -264,6 +303,51 @@ class Coordinator:
             },
         )
         return job
+
+    def _clear_pending_for_new_surrogate(
+        self,
+        *,
+        previous_surrogate_version: int,
+        completed_theta: np.ndarray,
+        completed_count: int,
+    ) -> None:
+        cancelled = self.queue.clear_pending()
+        if not cancelled:
+            return
+
+        decimals = self.config.active_learning.duplicate_round_decimals
+        completed_keys = {stable_theta_key(row, decimals) for row in completed_theta}
+        running_keys = {stable_theta_key(job.theta, decimals) for job in self.queue.running.values()}
+        for job in cancelled:
+            key = stable_theta_key(job.theta, decimals)
+            if key not in completed_keys and key not in running_keys:
+                self.known_keys.discard(key)
+            self.store.append_event(
+                "job_cancelled",
+                {
+                    "job_id": job.job_id,
+                    "job_sequence": job.sequence,
+                    "theta": job.theta.tolist(),
+                    "attempt": job.attempt,
+                    "source": job.source,
+                    "reason": "new_surrogate_trained",
+                    "previous_surrogate_version": previous_surrogate_version,
+                    "surrogate_version": self.surrogate_version,
+                    "completed_count": completed_count,
+                },
+            )
+        self.store.append_event(
+            "queue_pending_cleared",
+            {
+                "reason": "new_surrogate_trained",
+                "previous_surrogate_version": previous_surrogate_version,
+                "surrogate_version": self.surrogate_version,
+                "completed_count": completed_count,
+                "cancelled_count": len(cancelled),
+                "job_ids": [job.job_id for job in cancelled],
+                "job_sequences": [job.sequence for job in cancelled],
+            },
+        )
 
     def _assign_available_workers(self) -> None:
         for worker_rank in sorted(list(self.available_workers)):
@@ -363,6 +447,8 @@ class Coordinator:
         if self.surrogate is not None and new_since_train < self.config.surrogate.update_after_new_samples:
             return
 
+        previous_surrogate_version = self.surrogate_version
+        previous_completed_at_last_train = self.completed_at_last_train
         version = self.surrogate_version + 1
         try:
             warm = self.trainer.train(
@@ -407,6 +493,12 @@ class Coordinator:
                     "trained_from_scratch": chosen.trained_from_scratch,
                 },
             )
+            if previous_surrogate_version > 0 and completed.n > previous_completed_at_last_train:
+                self._clear_pending_for_new_surrogate(
+                    previous_surrogate_version=previous_surrogate_version,
+                    completed_theta=completed.theta,
+                    completed_count=completed.n,
+                )
         except Exception as exc:
             self.store.append_event(
                 "surrogate_train_failed",
@@ -425,14 +517,14 @@ class Coordinator:
         if count <= 0:
             return
         completed = self.store.load_completed()
-        existing_parts = [completed.theta]
+        queued_parts = []
         pending = self.queue.pending_theta()
         running = self.queue.running_theta()
         if pending.size:
-            existing_parts.append(pending.reshape(-1, self.config.problem.parameter_dim))
+            queued_parts.append(pending.reshape(-1, self.config.problem.parameter_dim))
         if running.size:
-            existing_parts.append(running.reshape(-1, self.config.problem.parameter_dim))
-        existing = np.vstack(existing_parts) if existing_parts else np.empty((0, self.config.problem.parameter_dim))
+            queued_parts.append(running.reshape(-1, self.config.problem.parameter_dim))
+        queued = np.vstack(queued_parts) if queued_parts else np.empty((0, self.config.problem.parameter_dim))
         try:
             hmc_result = self._draw_surrogate_posterior()
             candidate_count = min(self.config.active_learning.candidate_pool_size, hmc_result.theta.shape[0])
@@ -447,7 +539,8 @@ class Coordinator:
             selected = self.selector.select(
                 candidate_theta=candidate_theta,
                 candidate_log_prob=candidate_logp,
-                existing_theta=existing,
+                existing_theta=completed.theta,
+                queued_theta=queued,
                 count=count,
                 known_keys=self.known_keys,
             )
