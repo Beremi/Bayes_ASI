@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,19 @@ from typing import Any, Iterable
 
 import h5py
 import numpy as np
+
+
+SCHEMA_VERSION = 1
+_CHECKPOINT_PATTERN = re.compile(r"surrogate_v(\d+)\.pt$")
+_COMPLETED_DATASETS = (
+    "theta",
+    "outputs",
+    "elapsed_s",
+    "worker_rank",
+    "job_sequence",
+    "started_at",
+    "finished_at",
+)
 
 
 def now_seconds() -> float:
@@ -34,12 +48,14 @@ class CompletedData:
 
 
 class HDF5Store:
-    """Single-writer HDF5 store plus append-only JSONL events."""
+    """Durable single-writer sample store with an append-only event journal."""
 
     def __init__(self, run_dir: Path, parameter_dim: int, output_dim: int) -> None:
         self.run_dir = Path(run_dir)
         self.parameter_dim = int(parameter_dim)
         self.output_dim = int(output_dim)
+        if self.parameter_dim <= 0 or self.output_dim <= 0:
+            raise ValueError("parameter_dim and output_dim must be positive")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         self.data_path = self.run_dir / "data.h5"
@@ -53,24 +69,53 @@ class HDF5Store:
 
     def _ensure_hdf5(self) -> None:
         with h5py.File(self.data_path, "a") as h5:
-            h5.attrs["parameter_dim"] = self.parameter_dim
-            h5.attrs["output_dim"] = self.output_dim
+            self._validate_or_set_attribute(h5, "schema_version", SCHEMA_VERSION)
+            self._validate_or_set_attribute(h5, "parameter_dim", self.parameter_dim)
+            self._validate_or_set_attribute(h5, "output_dim", self.output_dim)
             group = h5.require_group("completed")
-            self._require_dataset(group, "theta", (0, self.parameter_dim), float)
-            self._require_dataset(group, "outputs", (0, self.output_dim), float)
-            self._require_dataset(group, "elapsed_s", (0,), float)
+            self._require_dataset(group, "theta", (0, self.parameter_dim), np.float64)
+            self._require_dataset(group, "outputs", (0, self.output_dim), np.float64)
+            self._require_dataset(group, "elapsed_s", (0,), np.float64)
             self._require_dataset(group, "worker_rank", (0,), np.int64)
             self._require_dataset(group, "job_sequence", (0,), np.int64)
-            self._require_dataset(group, "started_at", (0,), float)
-            self._require_dataset(group, "finished_at", (0,), float)
+            self._require_dataset(group, "started_at", (0,), np.float64)
+            self._require_dataset(group, "finished_at", (0,), np.float64)
+            self._validate_completed_group(group)
+
+    @staticmethod
+    def _validate_or_set_attribute(h5: h5py.File, name: str, expected: int) -> None:
+        if name in h5.attrs and int(h5.attrs[name]) != int(expected):
+            raise ValueError(f"HDF5 {name}={int(h5.attrs[name])}, expected {int(expected)}")
+        h5.attrs[name] = int(expected)
 
     @staticmethod
     def _require_dataset(group: h5py.Group, name: str, shape: tuple[int, ...], dtype: Any) -> None:
-        if name in group:
+        if name not in group:
+            maxshape = (None,) + tuple(shape[1:])
+            chunks = (1,) + tuple(shape[1:])
+            group.create_dataset(name, shape=shape, maxshape=maxshape, chunks=chunks, dtype=dtype)
             return
-        maxshape = (None,) + tuple(shape[1:])
-        chunks = (max(1, min(1024, shape[0] or 1)),) + tuple(shape[1:])
-        group.create_dataset(name, shape=shape, maxshape=maxshape, chunks=chunks, dtype=dtype)
+        dataset = group[name]
+        if not isinstance(dataset, h5py.Dataset):
+            raise ValueError(f"completed/{name} is not a dataset")
+        if dataset.ndim != len(shape) or tuple(dataset.shape[1:]) != tuple(shape[1:]):
+            raise ValueError(
+                f"completed/{name} has trailing shape {tuple(dataset.shape[1:])}, expected {tuple(shape[1:])}"
+            )
+
+    @staticmethod
+    def _validate_completed_group(group: h5py.Group) -> int:
+        lengths = {name: int(group[name].shape[0]) for name in _COMPLETED_DATASETS}
+        if len(set(lengths.values())) != 1:
+            detail = ", ".join(f"{name}={length}" for name, length in lengths.items())
+            raise ValueError(f"inconsistent completed dataset lengths: {detail}")
+        return next(iter(lengths.values()))
+
+    def completed_count(self) -> int:
+        """Read only the row count, avoiding a full sample-data load."""
+
+        with h5py.File(self.data_path, "r") as h5:
+            return self._validate_completed_group(h5["completed"])
 
     def append_completed(
         self,
@@ -83,30 +128,71 @@ class HDF5Store:
         started_at: float,
         finished_at: float,
     ) -> int:
-        theta = np.asarray(theta, dtype=float).reshape(1, self.parameter_dim)
-        outputs = np.asarray(outputs, dtype=float).reshape(1, self.output_dim)
+        return self.append_completed_batch(
+            theta=np.asarray(theta, dtype=float).reshape(1, self.parameter_dim),
+            outputs=np.asarray(outputs, dtype=float).reshape(1, self.output_dim),
+            elapsed_s=np.asarray([elapsed_s], dtype=float),
+            worker_rank=np.asarray([worker_rank], dtype=np.int64),
+            job_sequence=np.asarray([job_sequence], dtype=np.int64),
+            started_at=np.asarray([started_at], dtype=float),
+            finished_at=np.asarray([finished_at], dtype=float),
+        )
+
+    def append_completed_batch(
+        self,
+        *,
+        theta: np.ndarray,
+        outputs: np.ndarray,
+        elapsed_s: np.ndarray,
+        worker_rank: np.ndarray,
+        job_sequence: np.ndarray,
+        started_at: np.ndarray,
+        finished_at: np.ndarray,
+    ) -> int:
+        """Append one or more rows and return the first inserted HDF5 index."""
+
+        theta = np.asarray(theta, dtype=np.float64).reshape(-1, self.parameter_dim)
+        outputs = np.asarray(outputs, dtype=np.float64).reshape(-1, self.output_dim)
+        rows = int(theta.shape[0])
+        values = {
+            "theta": theta,
+            "outputs": outputs,
+            "elapsed_s": np.asarray(elapsed_s, dtype=np.float64).reshape(-1),
+            "worker_rank": np.asarray(worker_rank, dtype=np.int64).reshape(-1),
+            "job_sequence": np.asarray(job_sequence, dtype=np.int64).reshape(-1),
+            "started_at": np.asarray(started_at, dtype=np.float64).reshape(-1),
+            "finished_at": np.asarray(finished_at, dtype=np.float64).reshape(-1),
+        }
+        mismatched = [name for name, value in values.items() if value.shape[0] != rows]
+        if mismatched:
+            raise ValueError(f"completed batch row-count mismatch for: {', '.join(mismatched)}")
+        for name in ("theta", "outputs", "elapsed_s", "started_at", "finished_at"):
+            if not np.all(np.isfinite(values[name])):
+                raise ValueError(f"completed batch {name} contains non-finite values")
+
         with h5py.File(self.data_path, "a") as h5:
             group = h5["completed"]
-            index = int(group["theta"].shape[0])
-            self._append_row(group["theta"], theta)
-            self._append_row(group["outputs"], outputs)
-            self._append_row(group["elapsed_s"], np.asarray([elapsed_s], dtype=float))
-            self._append_row(group["worker_rank"], np.asarray([worker_rank], dtype=np.int64))
-            self._append_row(group["job_sequence"], np.asarray([job_sequence], dtype=np.int64))
-            self._append_row(group["started_at"], np.asarray([started_at], dtype=float))
-            self._append_row(group["finished_at"], np.asarray([finished_at], dtype=float))
-            h5.flush()
-        return index
-
-    @staticmethod
-    def _append_row(dataset: h5py.Dataset, row: np.ndarray) -> None:
-        old_n = int(dataset.shape[0])
-        dataset.resize(old_n + row.shape[0], axis=0)
-        dataset[old_n : old_n + row.shape[0]] = row
+            start = self._validate_completed_group(group)
+            if rows == 0:
+                return start
+            end = start + rows
+            try:
+                for name in _COMPLETED_DATASETS:
+                    group[name].resize(end, axis=0)
+                for name, value in values.items():
+                    group[name][start:end] = value
+                h5.flush()
+            except Exception:
+                for name in _COMPLETED_DATASETS:
+                    group[name].resize(start, axis=0)
+                h5.flush()
+                raise
+        return start
 
     def load_completed(self) -> CompletedData:
         with h5py.File(self.data_path, "r") as h5:
             group = h5["completed"]
+            self._validate_completed_group(group)
             return CompletedData(
                 theta=group["theta"][:],
                 outputs=group["outputs"][:],
@@ -116,32 +202,44 @@ class HDF5Store:
             )
 
     def append_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        event = {
-            "time": now_seconds(),
-            "type": event_type,
-            **payload,
-        }
+        event_type = event_type.strip()
+        if not event_type:
+            raise ValueError("event_type must not be empty")
+        event = {**payload, "time": now_seconds(), "type": event_type}
+        line = json.dumps(event, sort_keys=True, allow_nan=False) + "\n"
         with self.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True) + "\n")
+            handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
 
     def read_events(self) -> list[dict[str, Any]]:
+        """Read valid events, tolerating only a truncated final journal line."""
+
         if not self.events_path.exists():
             return []
+        lines = self.events_path.read_text(encoding="utf-8").splitlines(keepends=True)
         events: list[dict[str, Any]] = []
-        with self.events_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    events.append(json.loads(line))
+        for index, raw_line in enumerate(lines):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                is_truncated_tail = index == len(lines) - 1 and not raw_line.endswith("\n")
+                if is_truncated_tail:
+                    break
+                raise ValueError(f"invalid event JSON on line {index + 1}") from exc
+            if not isinstance(event, dict):
+                raise ValueError(f"event on line {index + 1} is not a JSON object")
+            events.append(event)
         return events
 
     def update_status(self, status: dict[str, Any]) -> None:
-        status = {"time": now_seconds(), **status}
+        status = {**status, "time": now_seconds()}
         tmp_path = self.status_path.with_suffix(".json.tmp")
         with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(status, handle, indent=2, sort_keys=True)
+            json.dump(status, handle, indent=2, sort_keys=True, allow_nan=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -151,9 +249,17 @@ class HDF5Store:
         data = self.load_completed()
         return {stable_theta_key(row, decimals=decimals) for row in data.theta}
 
+    def checkpoint_paths(self, *, newest_first: bool = False) -> list[Path]:
+        def version(path: Path) -> int:
+            match = _CHECKPOINT_PATTERN.fullmatch(path.name)
+            return int(match.group(1)) if match else -1
+
+        paths = [path for path in self.checkpoints_dir.glob("surrogate_v*.pt") if version(path) >= 0]
+        return sorted(paths, key=version, reverse=newest_first)
+
     def latest_checkpoint(self) -> Path | None:
-        checkpoints = sorted(self.checkpoints_dir.glob("surrogate_v*.pt"))
-        return checkpoints[-1] if checkpoints else None
+        checkpoints = self.checkpoint_paths(newest_first=True)
+        return checkpoints[0] if checkpoints else None
 
 
 def replay_queue_events(
@@ -179,9 +285,7 @@ def replay_queue_events(
                 "attempt": int(event.get("attempt", 0)),
                 "source": event.get("source", "replayed"),
             }
-        elif event_type == "job_completed":
-            terminal.add(job_id)
-        elif event_type == "job_cancelled":
+        elif event_type in {"job_completed", "job_cancelled"}:
             terminal.add(job_id)
         elif event_type == "job_failed" and int(event.get("will_retry", 0)) == 0:
             terminal.add(job_id)

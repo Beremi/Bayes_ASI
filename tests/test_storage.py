@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from bayes_asi.queue import Job, QueueState
@@ -11,6 +12,22 @@ from bayes_asi.storage import HDF5Store, replay_queue_events, stable_theta_key
 
 
 class StorageTests(unittest.TestCase):
+    def test_batch_append_and_count_only_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=2, output_dim=1)
+            start = store.append_completed_batch(
+                theta=np.array([[1.0, 2.0], [3.0, 4.0]]),
+                outputs=np.array([[5.0], [6.0]]),
+                elapsed_s=np.array([0.1, 0.2]),
+                worker_rank=np.array([1, 2]),
+                job_sequence=np.array([10, 11]),
+                started_at=np.array([1.0, 2.0]),
+                finished_at=np.array([1.1, 2.2]),
+            )
+            self.assertEqual(start, 0)
+            self.assertEqual(store.completed_count(), 2)
+            self.assertTrue(np.array_equal(store.load_completed().job_sequence, [10, 11]))
+
     def test_append_completed_and_replay_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = HDF5Store(Path(tmp), parameter_dim=2, output_dim=1)
@@ -86,6 +103,50 @@ class StorageTests(unittest.TestCase):
             store.update_status({"completed_count": 3})
             text = (Path(tmp) / "status.json").read_text(encoding="utf-8")
             self.assertIn('"completed_count": 3', text)
+
+    def test_existing_dimension_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            HDF5Store(Path(tmp), parameter_dim=2, output_dim=1)
+            with self.assertRaisesRegex(ValueError, "parameter_dim=2, expected 3"):
+                HDF5Store(Path(tmp), parameter_dim=3, output_dim=1)
+
+    def test_inconsistent_dataset_lengths_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
+            with h5py.File(store.data_path, "a") as h5:
+                h5["completed/theta"].resize(1, axis=0)
+            with self.assertRaisesRegex(ValueError, "inconsistent completed dataset lengths"):
+                store.load_completed()
+
+    def test_non_finite_completed_values_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
+            with self.assertRaisesRegex(ValueError, "non-finite"):
+                store.append_completed(
+                    theta=np.array([1.0]),
+                    outputs=np.array([np.nan]),
+                    elapsed_s=0.1,
+                    worker_rank=1,
+                    job_sequence=0,
+                    started_at=1.0,
+                    finished_at=1.1,
+                )
+
+    def test_truncated_final_event_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
+            store.append_event("run_started", {"value": 1})
+            with store.events_path.open("a", encoding="utf-8") as handle:
+                handle.write('{"type": "job_queued"')
+            events = store.read_events()
+            self.assertEqual([event["type"] for event in events], ["run_started"])
+
+    def test_checkpoint_paths_use_numeric_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
+            for name in ("surrogate_v2.pt", "surrogate_v10.pt", "surrogate_invalid.pt"):
+                (store.checkpoints_dir / name).touch()
+            self.assertEqual(store.latest_checkpoint().name, "surrogate_v10.pt")
 
 
 if __name__ == "__main__":
