@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 
 from bayes_asi.config import SurrogateConfig
-from bayes_asi.surrogate import SurrogateModel, SurrogateTrainer
+import torch
+
+from bayes_asi.surrogate import Normalization, SurrogateModel, SurrogateTrainer, TanhMLP
 
 
 class SurrogateTests(unittest.TestCase):
@@ -29,6 +31,8 @@ class SurrogateTests(unittest.TestCase):
             seed=5,
         )
         result = trainer.train(theta, outputs, version=1)
+        self.assertEqual(result.model.training_samples, 40)
+        self.assertGreaterEqual(result.epochs, result.best_epoch)
         point = np.array([0.2, -0.3], dtype=np.float32)
         jac = result.model.jacobian_numpy(point)
         eps = 1e-3
@@ -51,8 +55,38 @@ class SurrogateTests(unittest.TestCase):
             result.model.save(path)
             loaded = SurrogateModel.load(path)
             self.assertTrue(np.allclose(result.model.predict_numpy(theta[:3]), loaded.predict_numpy(theta[:3])))
+            self.assertEqual(loaded.training_samples, 40)
+
+    def test_warm_start_preserves_predictions_when_normalization_changes(self) -> None:
+        trainer = SurrogateTrainer(SurrogateConfig(hidden_layers=[5]), 2, 2, seed=3)
+        old = Normalization(
+            x_mean=torch.tensor([1.0, -2.0]),
+            x_std=torch.tensor([2.0, 0.5]),
+            y_mean=torch.tensor([4.0, -1.0]),
+            y_std=torch.tensor([3.0, 2.0]),
+        )
+        new = Normalization(
+            x_mean=torch.tensor([-3.0, 5.0]),
+            x_std=torch.tensor([0.7, 4.0]),
+            y_mean=torch.tensor([-2.0, 8.0]),
+            y_std=torch.tensor([1.5, 6.0]),
+        )
+        with torch.random.fork_rng():
+            torch.manual_seed(7)
+            network = TanhMLP(2, 2, [5])
+        old_model = SurrogateModel(network, old, [5], version=1, val_loss=0.0, device="cpu")
+        points = torch.tensor([[0.2, -0.3], [2.5, 1.2]])
+        expected = old_model(points).detach().numpy()
+
+        trainer._adapt_normalization(network, old, new)
+        new_model = SurrogateModel(network, new, [5], version=2, val_loss=0.0, device="cpu")
+        self.assertTrue(np.allclose(expected, new_model(points).detach().numpy(), atol=1e-6))
+
+    def test_training_rejects_non_finite_data(self) -> None:
+        trainer = SurrogateTrainer(SurrogateConfig(hidden_layers=[4], max_epochs=2), 1, 1, seed=1)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            trainer.train(np.array([[0.0], [1.0]]), np.array([[0.0], [np.nan]]), version=1)
 
 
 if __name__ == "__main__":
     unittest.main()
-

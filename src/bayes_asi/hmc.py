@@ -17,6 +17,7 @@ class HMCResult:
     theta: np.ndarray
     log_prob: np.ndarray
     accept_rate: float
+    warmup_accept_rate: float
     step_size: float
     leapfrog_steps: int
     mass_diag: np.ndarray
@@ -49,6 +50,8 @@ class HMCSampler:
         n_chains, dim = current.shape
         if n_chains != self.config.n_chains:
             raise ValueError(f"expected {self.config.n_chains} HMC chains, got {n_chains}")
+        if dim == 0 or not torch.isfinite(current).all():
+            raise ValueError("initial_z must be a finite, non-empty array")
 
         mass_diag = torch.ones(dim, dtype=torch.float32, device=self.device)
         inv_mass = torch.ones_like(mass_diag)
@@ -61,8 +64,8 @@ class HMCSampler:
         max_l = int(self.config.max_leapfrog_steps)
         tuned_l = max(min_l, min(max_l, (min_l + max_l) // 2))
 
-        total_accept = 0.0
-        total_draws = 0
+        warmup_accept = 0.0
+        sample_accept = 0.0
         samples: list[np.ndarray] = []
         logps: list[np.ndarray] = []
         warmup_states: list[np.ndarray] = []
@@ -76,6 +79,8 @@ class HMCSampler:
                 leapfrog_steps = self._jittered_leapfrog_count(tuned_l, min_l, max_l)
 
             current_logp, _ = self._log_prob_and_grad(current)
+            if not torch.isfinite(current_logp).all():
+                raise ValueError("current HMC state has non-finite log probability")
             momentum = torch.randn(current.shape, generator=self.generator, device=self.device) * torch.sqrt(mass_diag)
             proposal, proposal_momentum, proposal_logp = self._leapfrog(
                 current,
@@ -92,23 +97,24 @@ class HMCSampler:
             uniform = torch.rand((n_chains,), generator=self.generator, device=self.device)
             accept = uniform < accept_prob
             current = torch.where(accept[:, None], proposal.detach(), current.detach())
-            total_accept += float(accept.float().mean().detach().cpu())
-            total_draws += 1
+            mean_accepted = float(accept.float().mean().detach().cpu())
 
             if in_warmup:
+                warmup_accept += mean_accepted
                 mean_accept = float(accept_prob.mean().detach().cpu())
                 hbar, log_eps, log_eps_bar = self._dual_average_update(iteration, mean_accept, mu, hbar, log_eps_bar)
-                step_size = float(math.exp(log_eps))
+                step_size = self._bounded_step_size(log_eps)
                 warmup_states.append(current.detach().cpu().numpy())
                 if iteration == self.config.warmup_steps:
-                    step_size = float(math.exp(log_eps_bar))
+                    step_size = self._bounded_step_size(log_eps_bar)
                     stacked = np.concatenate(warmup_states, axis=0)
-                    variance = np.var(stacked, axis=0)
+                    variance = np.nan_to_num(np.var(stacked, axis=0), nan=1.0, posinf=1.0, neginf=1.0)
                     variance[variance < 1e-4] = 1.0
                     mass_diag = torch.as_tensor(variance, dtype=torch.float32, device=self.device)
                     inv_mass = 1.0 / mass_diag
                     tuned_l = self._tune_leapfrog_count(stacked, step_size, min_l, max_l)
             else:
+                sample_accept += mean_accepted
                 lp, _ = self._log_prob_and_grad(current)
                 samples.append(current.detach().cpu().numpy())
                 logps.append(lp.detach().cpu().numpy())
@@ -121,7 +127,8 @@ class HMCSampler:
             z=z,
             theta=theta.detach().cpu().numpy(),
             log_prob=log_prob,
-            accept_rate=total_accept / max(total_draws, 1),
+            accept_rate=sample_accept / self.config.samples_per_chain,
+            warmup_accept_rate=warmup_accept / max(self.config.warmup_steps, 1),
             step_size=step_size,
             leapfrog_steps=tuned_l,
             mass_diag=mass_diag.detach().cpu().numpy(),
@@ -178,6 +185,10 @@ class HMCSampler:
         log_eps_bar = weight * log_eps + (1.0 - weight) * log_eps_bar
         return hbar, log_eps, log_eps_bar
 
+    @staticmethod
+    def _bounded_step_size(log_step_size: float) -> float:
+        return float(math.exp(min(math.log(10.0), max(math.log(1e-6), log_step_size))))
+
     def _tune_leapfrog_count(self, warmup_states: np.ndarray, step_size: float, min_l: int, max_l: int) -> int:
         variance = np.var(warmup_states, axis=0)
         radius = float(np.sqrt(max(np.mean(variance), 1e-6) * warmup_states.shape[1]))
@@ -192,4 +203,3 @@ class HMCSampler:
     def _randint(self, low: int, high: int) -> int:
         value = torch.randint(low, high, (1,), generator=self.generator, device=self.device)
         return int(value.item())
-

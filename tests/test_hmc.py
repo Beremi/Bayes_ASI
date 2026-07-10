@@ -52,9 +52,23 @@ class HMCTests(unittest.TestCase):
         self.assertEqual(result.z.shape, (80, 2))
         self.assertTrue(np.isfinite(result.log_prob).all())
         self.assertGreater(result.accept_rate, 0.1)
+        self.assertGreaterEqual(result.warmup_accept_rate, 0.0)
         self.assertLess(np.abs(result.z.mean(axis=0)).max(), 0.8)
+
+    def test_non_finite_initial_state_is_rejected(self) -> None:
+        sampler = HMCSampler(
+            HMCConfig(n_chains=1, warmup_steps=0, samples_per_chain=1),
+            StandardNormalPosterior(),
+            ZeroSurrogate(),
+            seed=1,
+        )
+        with self.assertRaisesRegex(ValueError, "finite"):
+            sampler.sample(np.array([[np.nan, 0.0]], dtype=np.float32))
+
+    def test_adapted_step_size_is_bounded(self) -> None:
+        self.assertAlmostEqual(HMCSampler._bounded_step_size(-1000.0), 1e-6)
+        self.assertAlmostEqual(HMCSampler._bounded_step_size(1000.0), 10.0)
 
 
 if __name__ == "__main__":
     unittest.main()
-

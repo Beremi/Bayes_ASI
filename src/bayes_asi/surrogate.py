@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ class SurrogateModel:
         version: int,
         val_loss: float,
         device: str,
+        training_samples: int | None = None,
     ) -> None:
         self.network = network.to(device).eval()
         self.normalization = normalization
@@ -52,6 +54,7 @@ class SurrogateModel:
         self.version = int(version)
         self.val_loss = float(val_loss)
         self.device = device
+        self.training_samples = None if training_samples is None else int(training_samples)
 
     @property
     def parameter_dim(self) -> int:
@@ -91,8 +94,10 @@ class SurrogateModel:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "format_version": 2,
             "version": self.version,
             "val_loss": self.val_loss,
+            "training_samples": self.training_samples,
             "hidden_layers": self.hidden_layers,
             "parameter_dim": self.parameter_dim,
             "output_dim": self.output_dim,
@@ -102,11 +107,31 @@ class SurrogateModel:
             "y_mean": self.normalization.y_mean.detach().cpu(),
             "y_std": self.normalization.y_std.detach().cpu(),
         }
-        torch.save(payload, path)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
 
     @classmethod
     def load(cls, path: Path, device: str = "cpu") -> "SurrogateModel":
-        payload = torch.load(path, map_location=device)
+        try:
+            payload = torch.load(path, map_location=device, weights_only=True)
+        except TypeError:  # PyTorch versions before weights_only support.
+            payload = torch.load(path, map_location=device)
+        required = {
+            "version",
+            "val_loss",
+            "hidden_layers",
+            "parameter_dim",
+            "output_dim",
+            "state_dict",
+            "x_mean",
+            "x_std",
+            "y_mean",
+            "y_std",
+        }
+        missing = sorted(required - set(payload))
+        if missing:
+            raise ValueError(f"checkpoint {path} is missing: {', '.join(missing)}")
         network = TanhMLP(
             int(payload["parameter_dim"]),
             int(payload["output_dim"]),
@@ -126,6 +151,11 @@ class SurrogateModel:
             version=int(payload["version"]),
             val_loss=float(payload["val_loss"]),
             device=device,
+            training_samples=(
+                int(payload["training_samples"])
+                if payload.get("training_samples") is not None
+                else None
+            ),
         )
 
 
@@ -135,6 +165,7 @@ class TrainResult:
     train_loss: float
     val_loss: float
     epochs: int
+    best_epoch: int
     trained_from_scratch: bool
 
 
@@ -144,10 +175,10 @@ class SurrogateTrainer:
         self.parameter_dim = int(parameter_dim)
         self.output_dim = int(output_dim)
         self.seed = int(seed)
-        if config.device == "cuda" and not torch.cuda.is_available():
-            self.device = "cpu"
-        else:
-            self.device = config.device
+        requested = torch.device(config.device)
+        if requested.type == "cuda" and not torch.cuda.is_available():
+            requested = torch.device("cpu")
+        self.device = str(requested)
 
     def train(
         self,
@@ -160,12 +191,17 @@ class SurrogateTrainer:
     ) -> TrainResult:
         theta = np.asarray(theta, dtype=np.float32).reshape(-1, self.parameter_dim)
         outputs = np.asarray(outputs, dtype=np.float32).reshape(-1, self.output_dim)
+        if theta.shape[0] != outputs.shape[0]:
+            raise ValueError("theta and outputs row counts differ")
         if theta.shape[0] < 2:
             raise ValueError("at least two completed samples are required to train a surrogate")
+        if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(outputs)):
+            raise ValueError("theta and outputs must contain only finite values")
 
         seed = self.seed + int(version) * 1009 + (17 if force_scratch else 0)
-        torch.manual_seed(seed)
         rng = np.random.default_rng(seed)
+        generator = torch.Generator(device=self.device)
+        generator.manual_seed(seed)
 
         x_mean = torch.as_tensor(theta.mean(axis=0), dtype=torch.float32, device=self.device)
         x_std_np = theta.std(axis=0)
@@ -177,9 +213,18 @@ class SurrogateTrainer:
         y_std = torch.as_tensor(y_std_np, dtype=torch.float32, device=self.device)
         normalization = Normalization(x_mean=x_mean, x_std=x_std, y_mean=y_mean, y_std=y_std)
 
-        network = TanhMLP(self.parameter_dim, self.output_dim, self.config.hidden_layers)
-        if previous is not None and not force_scratch and previous.hidden_layers == self.config.hidden_layers:
-            network.load_state_dict(previous.network.state_dict())
+        with torch.random.fork_rng():
+            torch.manual_seed(seed)
+            network = TanhMLP(self.parameter_dim, self.output_dim, self.config.hidden_layers)
+        warm_started = previous is not None and not force_scratch
+        if warm_started:
+            if previous.parameter_dim != self.parameter_dim or previous.output_dim != self.output_dim:
+                raise ValueError("previous surrogate dimensions do not match the trainer")
+            if previous.hidden_layers != self.config.hidden_layers:
+                warm_started = False
+            else:
+                network.load_state_dict(previous.network.state_dict())
+                self._adapt_normalization(network, previous.normalization, normalization)
         network.to(self.device).train()
 
         x = torch.as_tensor(theta, dtype=torch.float32, device=self.device)
@@ -188,7 +233,11 @@ class SurrogateTrainer:
         y_norm = (y - y_mean) / y_std
 
         train_idx, val_idx = self._split_indices(theta.shape[0], rng)
-        optimizer = torch.optim.Adam(network.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
+        optimizer = torch.optim.Adam(
+            network.parameters(),
+            lr=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             factor=self.config.scheduler_factor,
@@ -201,11 +250,12 @@ class SurrogateTrainer:
         best_epoch = 0
         stale_epochs = 0
         train_loss = float("inf")
-        val_loss = float("inf")
         batch_size = max(1, int(self.config.batch_size))
+        epochs_run = 0
 
         for epoch in range(1, self.config.max_epochs + 1):
-            order = train_idx[torch.randperm(train_idx.numel(), device=self.device)]
+            epochs_run = epoch
+            order = train_idx[torch.randperm(train_idx.numel(), generator=generator, device=self.device)]
             network.train()
             for start in range(0, order.numel(), batch_size):
                 batch_idx = order[start : start + batch_size]
@@ -219,10 +269,8 @@ class SurrogateTrainer:
             with torch.no_grad():
                 train_loss = float(loss_fn(network(x_norm[train_idx]), y_norm[train_idx]).detach().cpu())
                 if val_idx.numel() > 0:
-                    val_loss = float(loss_fn(network(x_norm[val_idx]), y_norm[val_idx]).detach().cpu())
-                    metric = val_loss
+                    metric = float(loss_fn(network(x_norm[val_idx]), y_norm[val_idx]).detach().cpu())
                 else:
-                    val_loss = train_loss
                     metric = train_loss
             scheduler.step(metric)
             if metric < best_metric:
@@ -237,6 +285,13 @@ class SurrogateTrainer:
 
         if best_state is not None:
             network.load_state_dict(best_state)
+        network.eval()
+        with torch.no_grad():
+            train_loss = float(loss_fn(network(x_norm[train_idx]), y_norm[train_idx]).detach().cpu())
+            if val_idx.numel() > 0:
+                best_metric = float(loss_fn(network(x_norm[val_idx]), y_norm[val_idx]).detach().cpu())
+            else:
+                best_metric = train_loss
         model = SurrogateModel(
             network=network,
             normalization=normalization,
@@ -244,14 +299,52 @@ class SurrogateTrainer:
             version=version,
             val_loss=best_metric,
             device=self.device,
+            training_samples=theta.shape[0],
         )
         return TrainResult(
             model=model,
             train_loss=float(train_loss),
             val_loss=float(best_metric),
-            epochs=int(best_epoch or self.config.max_epochs),
-            trained_from_scratch=force_scratch or previous is None,
+            epochs=epochs_run,
+            best_epoch=best_epoch,
+            trained_from_scratch=not warm_started,
         )
+
+    @staticmethod
+    def _adapt_normalization(
+        network: TanhMLP,
+        previous: Normalization,
+        current: Normalization,
+    ) -> None:
+        """Preserve physical predictions while changing input/output scaling."""
+
+        linear_layers = [layer for layer in network.network if isinstance(layer, nn.Linear)]
+        first = linear_layers[0]
+        last = linear_layers[-1]
+        device = first.weight.device
+        dtype = first.weight.dtype
+        old_x_mean = previous.x_mean.to(device=device, dtype=dtype)
+        old_x_std = previous.x_std.to(device=device, dtype=dtype)
+        new_x_mean = current.x_mean.to(device=device, dtype=dtype)
+        new_x_std = current.x_std.to(device=device, dtype=dtype)
+        old_y_mean = previous.y_mean.to(device=device, dtype=dtype)
+        old_y_std = previous.y_std.to(device=device, dtype=dtype)
+        new_y_mean = current.y_mean.to(device=device, dtype=dtype)
+        new_y_std = current.y_std.to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            first_weight = first.weight.detach().clone()
+            input_scale = new_x_std / old_x_std
+            input_shift = (new_x_mean - old_x_mean) / old_x_std
+            first.weight.copy_(first_weight * input_scale.reshape(1, -1))
+            first.bias.add_(first_weight @ input_shift)
+
+            last_weight = last.weight.detach().clone()
+            last_bias = last.bias.detach().clone()
+            output_scale = old_y_std / new_y_std
+            output_shift = (old_y_mean - new_y_mean) / new_y_std
+            last.weight.copy_(last_weight * output_scale.reshape(-1, 1))
+            last.bias.copy_(last_bias * output_scale + output_shift)
 
     def _split_indices(self, n: int, rng: np.random.Generator) -> tuple[torch.Tensor, torch.Tensor]:
         order = rng.permutation(n)
@@ -265,4 +358,3 @@ class SurrogateTrainer:
             torch.as_tensor(train_idx_np, dtype=torch.long, device=self.device),
             torch.as_tensor(val_idx_np, dtype=torch.long, device=self.device),
         )
-
