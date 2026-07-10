@@ -1,0 +1,50 @@
+run:
+  output_dir: runs/bounded_decay
+  time_budget_seconds: 20
+  seed: 20260702
+  status_interval_seconds: 1.0
+
+problem:
+  latent_dim: 3
+  parameter_dim: 3
+  output_dim: 16
+
+solver:
+  factory: bayes_asi.examples.bounded_decay:make_solver
+
+posterior:
+  factory: bayes_asi.examples.bounded_decay:make_posterior
+  kwargs:
+    theta_true: [1.7, 0.8, 0.1]
+    bounds:
+      - [0.5, 2.5]
+      - [0.2, 2.0]
+      - [-0.2, 0.5]
+    noise_sd: 0.04
+
+initial_design:
+  n_points: 14
+
+surrogate:
+  hidden_layers: [32, 32]
+  max_epochs: 250
+  batch_size: 64
+  validation_fraction: 0.0
+  patience: 40
+  min_train_samples: 10
+  update_after_new_samples: 4
+
+hmc:
+  n_chains: 4
+  warmup_steps: 40
+  samples_per_chain: 60
+  initial_step_size: 0.05
+  min_leapfrog_steps: 2
+  max_leapfrog_steps: 12
+
+active_learning:
+  candidate_pool_size: 200
+  batch_max_size: 4
+
+queue:
+  target_seconds_ahead: 1.0

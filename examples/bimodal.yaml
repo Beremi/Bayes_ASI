@@ -1,0 +1,47 @@
+run:
+  output_dir: runs/bimodal
+  time_budget_seconds: 15
+  seed: 20260703
+  status_interval_seconds: 1.0
+
+problem:
+  latent_dim: 1
+  parameter_dim: 1
+  output_dim: 1
+
+solver:
+  factory: bayes_asi.examples.bimodal:make_solver
+
+posterior:
+  factory: bayes_asi.examples.bimodal:make_posterior
+  kwargs:
+    theta_true: 1.5
+    noise_sd: 0.08
+    prior_sd: 2.0
+
+initial_design:
+  n_points: 10
+
+surrogate:
+  hidden_layers: [24, 24]
+  max_epochs: 200
+  batch_size: 32
+  validation_fraction: 0.0
+  patience: 35
+  min_train_samples: 8
+  update_after_new_samples: 3
+
+hmc:
+  n_chains: 6
+  warmup_steps: 30
+  samples_per_chain: 50
+  initial_step_size: 0.06
+  min_leapfrog_steps: 2
+  max_leapfrog_steps: 12
+
+active_learning:
+  candidate_pool_size: 200
+  batch_max_size: 4
+
+queue:
+  target_seconds_ahead: 1.0

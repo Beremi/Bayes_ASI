@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from bayes_asi.config import AppConfig
+from bayes_asi.examples._common import float_vector, require_dimensions
 from bayes_asi.types import ForwardResult, SolverContext
 
 
@@ -61,7 +62,9 @@ class SyntheticPosterior:
 
 
 def make_solver(config: AppConfig, sleep_seconds: float = 0.0) -> SyntheticSolver:
-    del config
+    require_dimensions(config, latent_dim=2, parameter_dim=2, output_dim=2)
+    if sleep_seconds < 0.0:
+        raise ValueError("sleep_seconds must be non-negative")
     return SyntheticSolver(sleep_seconds=float(sleep_seconds))
 
 
@@ -71,14 +74,17 @@ def make_posterior(
     noise_sd: list[float] | None = None,
     prior_sd: float = 2.0,
 ) -> SyntheticPosterior:
-    del config
+    require_dimensions(config, latent_dim=2, parameter_dim=2, output_dim=2)
     theta_true = [0.7, -1.2] if theta_true is None else theta_true
     noise_sd = [0.12, 0.18] if noise_sd is None else noise_sd
+    theta_true_array = float_vector(theta_true, size=2, name="theta_true")
+    noise_array = float_vector(noise_sd, size=2, name="noise_sd", positive=True)
+    if prior_sd <= 0.0:
+        raise ValueError("prior_sd must be positive")
     with torch.no_grad():
-        observed = synthetic_forward_torch(torch.as_tensor(theta_true, dtype=torch.float32)).reshape(-1)
+        observed = synthetic_forward_torch(torch.as_tensor(theta_true_array)).reshape(-1)
     return SyntheticPosterior(
         observed=observed,
-        noise_sd=torch.as_tensor(noise_sd, dtype=torch.float32),
+        noise_sd=torch.as_tensor(noise_array),
         prior_sd=float(prior_sd),
     )
-
