@@ -14,6 +14,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from bayes_asi.examples.darcy_flow import DEFAULT_BOUNDS
+
 
 @unittest.skipUnless(
     os.environ.get("BAYES_ASI_DARCY_MPI_TEST") == "1",
@@ -51,8 +53,18 @@ class DarcyMPITests(unittest.TestCase):
             with h5py.File(run_dir / "data.h5", "r") as h5:
                 elapsed = np.asarray(h5["completed/elapsed_s"])
                 outputs = np.asarray(h5["completed/outputs"])
+                theta = np.asarray(h5["completed/theta"])
+                sequence = np.asarray(h5["completed/job_sequence"])
             self.assertTrue(np.all(elapsed >= 1.4))
             self.assertTrue(np.all(np.isfinite(outputs)))
+            initial_theta = theta[np.argsort(sequence)[:4]]
+            unit = (initial_theta - DEFAULT_BOUNDS[:, 0]) / (DEFAULT_BOUNDS[:, 1] - DEFAULT_BOUNDS[:, 0])
+            for column in range(unit.shape[1]):
+                strata = np.floor(unit[:, column] * len(unit)).astype(int)
+                self.assertTrue(np.array_equal(np.sort(strata), np.arange(len(unit))))
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+            design_events = [event for event in events if event["type"] == "initial_design_generated"]
+            self.assertEqual(design_events[0]["method"], "latin_hypercube_prior")
             self.assertGreaterEqual(wall_time, 2.8)
             self.assertLess(wall_time, 25.0)
 

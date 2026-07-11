@@ -3,12 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 import numpy as np
 import torch
 
 from bayes_asi.config import build_factory_object, load_config
+from bayes_asi.design import latin_hypercube
 from bayes_asi.types import SolverContext
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,10 @@ class SyntheticExampleTests(unittest.TestCase):
         solver = build_factory_object(config.solver, config)
         posterior = build_factory_object(config.posterior, config)
         rng = np.random.default_rng(17)
+        unit = latin_hypercube(rng, config.hmc.n_chains, config.problem.latent_dim)
+        prior_z = posterior.prior_transform(unit)
+        self.assertEqual(prior_z.shape, (config.hmc.n_chains, config.problem.latent_dim))
+        self.assertTrue(np.all(np.isfinite(prior_z)))
         z = posterior.initial_z(rng, config.hmc.n_chains)
         z_tensor = torch.as_tensor(z, dtype=torch.float32).requires_grad_(True)
         theta = posterior.z_to_theta(z_tensor)
@@ -49,7 +55,12 @@ class SyntheticExampleTests(unittest.TestCase):
         self._exercise("synthetic.yaml")
 
     def test_linear_gaussian_example_callbacks(self) -> None:
-        self._exercise("linear_gaussian.yaml")
+        _, posterior, _, _ = self._exercise("linear_gaussian.yaml")
+        unit = np.array([[0.1, 0.25], [0.5, 0.75], [0.9, 0.6]])
+        transformed = posterior.prior_transform(unit)
+        standard = np.vectorize(NormalDist().inv_cdf)(unit)
+        expected = standard * posterior.prior_sd.numpy()
+        self.assertTrue(np.allclose(transformed, expected, atol=1e-6))
 
     def test_bounded_decay_example_respects_parameter_bounds(self) -> None:
         _, posterior, theta, _ = self._exercise("bounded_decay.yaml")

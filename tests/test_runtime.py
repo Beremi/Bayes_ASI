@@ -32,6 +32,10 @@ class NonFiniteSolver:
         return ForwardResult(outputs=np.array([np.nan, 1.0]))
 
 
+class LegacyPosteriorWithoutPriorTransform:
+    pass
+
+
 class RuntimeTests(unittest.TestCase):
     def _config(self, run_dir: Path, *, initial_data: bool = True, retry_seconds: float = 60.0):
         initial_section = (
@@ -81,6 +85,35 @@ hmc:
             events = coordinator.store.read_events()
             loaded = [event for event in events if event["type"] == "initial_data_loaded"]
             self.assertEqual(loaded[0]["skipped_existing"], 1)
+
+    def test_empty_run_uses_latin_hypercube_transformed_through_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(__file__).resolve().parents[1] / "examples" / "bounded_decay.yaml")
+            config.run.output_dir = Path(tmp) / "run"
+            coordinator = Coordinator(config, FakeComm())
+
+            theta = coordinator._draw_initial_theta(12)
+            bounds = coordinator.posterior.bounds.detach().cpu().numpy()
+            unit = (theta - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
+
+            for column in range(unit.shape[1]):
+                strata = np.floor(unit[:, column] * len(unit)).astype(int)
+                self.assertTrue(np.array_equal(np.sort(strata), np.arange(len(unit))))
+
+    def test_initial_design_below_training_minimum_fails_early(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", initial_data=False)
+            coordinator = Coordinator(config, FakeComm())
+            with self.assertRaisesRegex(ValueError, "cannot bootstrap surrogate"):
+                coordinator._ensure_initial_design()
+
+    def test_missing_prior_transform_fails_with_contract_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", initial_data=False)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator.posterior = LegacyPosteriorWithoutPriorTransform()
+            with self.assertRaisesRegex(TypeError, "prior_transform"):
+                coordinator._draw_initial_theta(2)
 
     def test_failed_training_obeys_retry_backoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

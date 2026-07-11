@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from bayes_asi.config import AppConfig
-from bayes_asi.examples._common import require_dimensions
+from bayes_asi.examples._common import require_dimensions, standard_normal_quantile
 from bayes_asi.types import ForwardResult, SolverContext
 
 
@@ -35,6 +35,9 @@ class BimodalPosterior:
         signs = np.where(np.arange(n_chains) % 2 == 0, -1.0, 1.0)
         centers = signs * self.mode_location
         return rng.normal(centers, 0.25, size=n_chains).reshape(-1, 1).astype(np.float32)
+
+    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
+        return standard_normal_quantile(unit, size=1) * self.prior_sd
 
     def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
         return z.reshape(-1, 1)

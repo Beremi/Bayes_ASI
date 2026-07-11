@@ -10,7 +10,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import spsolve
 
 from bayes_asi.config import AppConfig
-from bayes_asi.examples._common import float_vector, require_dimensions
+from bayes_asi.examples._common import float_vector, require_dimensions, unit_to_logit
 from bayes_asi.types import ForwardResult, SolverContext
 
 SENSOR_POSITIONS = np.array(
@@ -234,7 +234,10 @@ class DarcyFlowPosterior:
 
     def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
         unit = np.clip(rng.random((n_chains, 3)), 1e-6, 1.0 - 1e-6)
-        return np.log(unit / (1.0 - unit)).astype(np.float32)
+        return self.prior_transform(unit)
+
+    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
+        return unit_to_logit(unit, size=3)
 
     def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
         z = z.reshape(-1, 3)

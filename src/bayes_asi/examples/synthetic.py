@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from bayes_asi.config import AppConfig
-from bayes_asi.examples._common import float_vector, require_dimensions
+from bayes_asi.examples._common import float_vector, require_dimensions, standard_normal_quantile
 from bayes_asi.types import ForwardResult, SolverContext
 
 
@@ -45,6 +45,9 @@ class SyntheticPosterior:
 
     def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
         return rng.normal(loc=0.0, scale=self.prior_sd, size=(n_chains, 2)).astype(np.float32)
+
+    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
+        return standard_normal_quantile(unit, size=2) * self.prior_sd
 
     def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
         return z.reshape(-1, 2)

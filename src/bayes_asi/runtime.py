@@ -13,6 +13,7 @@ from mpi4py import MPI
 
 from bayes_asi.active import ActiveSelector
 from bayes_asi.config import AppConfig, build_factory_object, load_config
+from bayes_asi.design import latin_hypercube
 from bayes_asi.hmc import HMCResult, HMCSampler
 from bayes_asi.queue import Job, QueueState
 from bayes_asi.storage import HDF5Store, exclusive_run_lock, replay_queue_events, stable_theta_key
@@ -310,19 +311,43 @@ class Coordinator:
 
     def _ensure_initial_design(self) -> None:
         target = self.config.initial_design.n_points
+        projected_rows = max(target, self.completed_count + self.queue.in_system_count)
+        if self.surrogate is None and projected_rows < self.config.surrogate.min_train_samples:
+            raise ValueError(
+                "cannot bootstrap surrogate: completed, replayed, and configured initial-design rows "
+                f"provide at most {projected_rows} samples, but surrogate.min_train_samples="
+                f"{self.config.surrogate.min_train_samples}; increase initial_design.n_points or provide initial_data"
+            )
         missing = target - self.completed_count - self.queue.in_system_count
         if missing <= 0:
             return
         theta = self._draw_initial_theta(missing)
+        queued = 0
         for row in theta:
-            self._queue_theta(row, source="initial")
+            queued += self._queue_theta(row, source="initial") is not None
+        self.store.append_event(
+            "initial_design_generated",
+            {
+                "method": "latin_hypercube_prior",
+                "requested_count": missing,
+                "queued_count": queued,
+                "latent_dim": self.config.problem.latent_dim,
+            },
+        )
 
     def _draw_initial_theta(self, n: int) -> np.ndarray:
-        z = self.posterior.initial_z(self.rng, n)
+        unit = latin_hypercube(self.rng, n, self.config.problem.latent_dim)
+        prior_transform = getattr(self.posterior, "prior_transform", None)
+        if not callable(prior_transform):
+            raise TypeError(
+                "posterior must implement prior_transform(unit) for Latin-hypercube initial design"
+            )
+        z = prior_transform(unit)
         z = np.asarray(z, dtype=np.float32)
         if z.shape != (n, self.config.problem.latent_dim) or not np.all(np.isfinite(z)):
             raise ValueError(
-                f"posterior.initial_z must return finite shape {(n, self.config.problem.latent_dim)}, got {z.shape}"
+                "posterior.prior_transform must return finite shape "
+                f"{(n, self.config.problem.latent_dim)}, got {z.shape}"
             )
         with torch.no_grad():
             theta = self.posterior.z_to_theta(torch.as_tensor(z, device=self.trainer.device))

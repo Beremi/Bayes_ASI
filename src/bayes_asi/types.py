@@ -39,7 +39,10 @@ class Posterior(Protocol):
     """Problem-specific posterior interface evaluated on a surrogate."""
 
     def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
-        """Return initial unconstrained latent samples for HMC or design."""
+        """Return initial unconstrained latent states for HMC chains."""
+
+    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
+        """Map open-unit-cube quantiles to samples from the latent prior."""
 
     def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
         """Map unconstrained HMC variables to physical solver parameters."""
