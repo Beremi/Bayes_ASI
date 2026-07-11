@@ -112,20 +112,29 @@ class StorageTests(unittest.TestCase):
     def test_auxiliary_schema_mismatch_rolls_back_every_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = HDF5Store(Path(tmp), parameter_dim=1, output_dim=1)
-            common = {
-                "z": np.array([0.0]),
-                "theta": np.array([1.0]),
-                "outputs": np.array([2.0]),
-                "elapsed_s": 0.1,
-                "worker_rank": 1,
-                "job_sequence": 0,
-                "started_at": 1.0,
-                "finished_at": 1.1,
-            }
-            store.append_completed(**common, auxiliary={"curve": np.ones(2, dtype=np.float32)})
-            common["job_sequence"] = 1
+            store.append_completed(
+                z=np.array([0.0]),
+                theta=np.array([1.0]),
+                outputs=np.array([2.0]),
+                elapsed_s=0.1,
+                worker_rank=1,
+                job_sequence=0,
+                started_at=1.0,
+                finished_at=1.1,
+                auxiliary={"curve": np.ones(2, dtype=np.float32)},
+            )
             with self.assertRaisesRegex(ValueError, "shape/dtype"):
-                store.append_completed(**common, auxiliary={"curve": np.ones(3, dtype=np.float32)})
+                store.append_completed(
+                    z=np.array([0.0]),
+                    theta=np.array([1.0]),
+                    outputs=np.array([2.0]),
+                    elapsed_s=0.1,
+                    worker_rank=1,
+                    job_sequence=1,
+                    started_at=1.0,
+                    finished_at=1.1,
+                    auxiliary={"curve": np.ones(3, dtype=np.float32)},
+                )
 
             self.assertEqual(store.completed_count(), 1)
             curve = store.load_auxiliary("curve")

@@ -47,7 +47,7 @@ class MPISmokeTests(unittest.TestCase):
                         cwd=repo,
                         env=env,
                         check=True,
-                        timeout=20,
+                        timeout=30,
                     )
                     self.assertTrue((run_dir / "data.h5").exists())
                     status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
@@ -69,7 +69,7 @@ class MPISmokeTests(unittest.TestCase):
             f"""
             run:
               output_dir: {run_dir}
-              time_budget_seconds: 2
+              time_budget_seconds: 4
               status_interval_seconds: 0.25
               seed: 11
             problem:

@@ -12,8 +12,8 @@ from bayes_asi.priors import IndependentPrior, beta, lognormal, normal, uniform
 
 
 class ZeroSurrogate:
-    def __call__(self, theta: torch.Tensor) -> torch.Tensor:
-        return torch.zeros((theta.reshape(-1, 2).shape[0], 1), dtype=theta.dtype, device=theta.device)
+    def __call__(self, z: torch.Tensor) -> torch.Tensor:
+        return torch.zeros((z.reshape(-1, 2).shape[0], 1), dtype=z.dtype, device=z.device)
 
 
 class StandardNormalPosterior:
