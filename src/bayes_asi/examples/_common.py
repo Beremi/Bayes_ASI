@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
+from numpy.typing import ArrayLike
 
 from bayes_asi.config import AppConfig
 
@@ -27,7 +26,7 @@ def require_dimensions(
         )
 
 
-def float_vector(values: Sequence[float], *, size: int, name: str, positive: bool = False) -> np.ndarray:
+def float_vector(values: ArrayLike, *, size: int, name: str, positive: bool = False) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     if array.shape != (size,):
         raise ValueError(f"{name} must contain exactly {size} values")

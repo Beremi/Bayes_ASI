@@ -15,8 +15,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SyntheticExampleTests(unittest.TestCase):
-    def _exercise(self, config_name: str) -> tuple[Any, Any, torch.Tensor, torch.Tensor]:
+    def _exercise(
+        self,
+        config_name: str,
+        *,
+        solver_overrides: dict[str, Any] | None = None,
+        posterior_overrides: dict[str, Any] | None = None,
+    ) -> tuple[Any, Any, torch.Tensor, torch.Tensor]:
         config = load_config(REPOSITORY_ROOT / "examples" / config_name)
+        config.solver.kwargs.update(solver_overrides or {})
+        config.posterior.kwargs.update(posterior_overrides or {})
         solver = build_factory_object(config.solver, config)
         posterior = build_factory_object(config.posterior, config)
         rng = np.random.default_rng(17)
@@ -55,6 +63,13 @@ class SyntheticExampleTests(unittest.TestCase):
         y_pred = theta**2
         logp = posterior.log_prior_z(theta) + posterior.log_likelihood(theta, y_pred)
         self.assertAlmostEqual(float(logp[0]), float(logp[1]), places=6)
+
+    def test_darcy_flow_example_callbacks(self) -> None:
+        self._exercise(
+            "darcy_flow.yaml",
+            solver_overrides={"nx": 24, "ny": 20, "minimum_runtime_seconds": 0.0},
+            posterior_overrides={"nx": 24, "ny": 20},
+        )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+examples = [
+  "scipy>=1.11",
+]
 dev = [
   "build>=1.2",
   "mypy>=1.10",
@@ -50,5 +53,5 @@ warn_unused_ignores = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-module = ["h5py", "yaml"]
+module = ["h5py", "scipy.*", "yaml"]
 ignore_missing_imports = true

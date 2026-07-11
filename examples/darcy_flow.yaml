@@ -1,0 +1,67 @@
+run:
+  output_dir: runs/darcy_flow
+  time_budget_seconds: 45
+  drain_running_on_exit: true
+  seed: 20260711
+  status_interval_seconds: 1.0
+
+problem:
+  latent_dim: 3
+  parameter_dim: 3
+  output_dim: 13
+
+solver:
+  factory: bayes_asi.examples.darcy_flow:make_solver
+  kwargs:
+    nx: 96
+    ny: 96
+    minimum_runtime_seconds: 1.5
+    save_fields: false
+
+posterior:
+  factory: bayes_asi.examples.darcy_flow:make_posterior
+  kwargs:
+    theta_true: [-0.35, -2.1, 0.65]
+    bounds:
+      - [-2.5, 1.0]
+      - [-4.0, 0.5]
+      - [-1.5, 2.0]
+    nx: 96
+    ny: 96
+    head_noise_sd: 0.01
+    relative_flux_noise: 0.03
+
+initial_design:
+  n_points: 10
+
+surrogate:
+  hidden_layers: [48, 48]
+  learning_rate: 0.001
+  max_epochs: 300
+  batch_size: 64
+  validation_fraction: 0.0
+  patience: 45
+  min_train_samples: 8
+  update_after_new_samples: 3
+
+hmc:
+  n_chains: 4
+  warmup_steps: 35
+  samples_per_chain: 60
+  target_accept: 0.8
+  initial_step_size: 0.05
+  min_leapfrog_steps: 2
+  max_leapfrog_steps: 12
+
+active_learning:
+  candidate_pool_size: 200
+  batch_max_size: 4
+  posterior_weight: 1.0
+  distance_weight: 0.6
+
+queue:
+  min_pending_per_worker: 1
+  max_pending_per_worker: 2
+  refill_threshold_pending_per_worker: 1
+  target_seconds_ahead: 4.0
+  retry_limit: 1
