@@ -15,15 +15,16 @@ This avoids HDF5 write contention and makes event replay deterministic.
 
 At startup rank 0:
 
-1. Loads and validates YAML.
+1. Loads and validates YAML, then acquires an exclusive run-directory lock.
 2. Creates or validates the run-directory HDF5 schema.
 3. Loads completed sample keys and count.
 4. Reads valid journal events, ignoring only a truncated final line.
 5. Tries checkpoints newest first until a compatible valid model loads.
-6. Replays queued, nonterminal, nonduplicate jobs.
-7. Cancels replayed jobs produced by an older surrogate version.
-8. Imports optional initial data in one transaction.
-9. Queues missing prior-design points.
+6. Replays queued, nonterminal, nonduplicate jobs, preserving retry attempts.
+7. Cancels active jobs whose source version differs from the loaded surrogate.
+8. Saves a content-addressed configuration snapshot and journals its SHA-256.
+9. Imports optional initial data in one transaction.
+10. Queues missing prior-design points.
 
 The run loop then:
 
@@ -122,6 +123,12 @@ This is a compact custom HMC implementation, not NUTS. Users should inspect
 acceptance rates and posterior stability, especially for multimodal,
 discontinuous, or strongly correlated problems.
 
+Surrogate training checks the run deadline between batches, and HMC checks it
+between leapfrog steps. A coordinator does not start another expensive phase
+after the deadline. Running external solver callbacks remain governed by the
+configured drain or abort policy because ordinary MPI messages cannot interrupt
+a callback safely.
+
 ## Active Selection
 
 The candidate pool is drawn from the surrogate posterior. For each candidate,
@@ -168,5 +175,6 @@ cannot be safely interrupted through ordinary MPI messages.
 - Unexpected fatal exceptions call `MPI.Abort(1)` so workers do not wait
   indefinitely.
 - Status and posterior-batch files use atomic replacement.
+- A POSIX advisory lock rejects a second coordinator for the same run directory.
 
 See [Operations](operations.md) for operator-facing recovery procedures.

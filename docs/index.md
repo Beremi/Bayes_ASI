@@ -12,7 +12,7 @@ Use these guides according to what you are doing:
   persistence, surrogate training, HMC, and active selection.
 - [Operations and troubleshooting](operations.md): run directories, budgets,
   restart behavior, failures, and common MPI issues.
-- [Synthetic examples](examples.md): equations, intended lessons, and run
+- [Examples](examples.md): equations, intended lessons, and run
   commands for all bundled examples.
 - [Python and CLI API](api.md): supported imports, callback data classes, and
   command behavior.

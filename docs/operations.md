@@ -13,6 +13,10 @@ workers than the external solver license, memory, filesystem, or CPU allocation
 can support. Solver callbacks should set their own thread counts when each MPI
 rank launches a threaded native application.
 
+Only one coordinator may own an output directory. A second launch fails with
+the host and process recorded in `run.lock`; the file itself remains after a
+clean exit, but the advisory lock is released.
+
 ## Watching a Run
 
 Read the atomic status snapshot:
@@ -50,6 +54,7 @@ storage, and restart-state construction.
 With `drain_running_on_exit: true`:
 
 - no new jobs are assigned after the deadline;
+- surrogate training and HMC stop at deadline checkpoints;
 - running jobs finish and are stored;
 - pending jobs remain journaled for a future resume;
 - workers receive a normal stop message.
@@ -73,7 +78,13 @@ mpiexec -n 8 bayes-asi run path/to/problem.yaml
 
 Restart reconstructs pending jobs from journal history. Jobs are terminal after
 completion, permanent failure, or cancellation. Completed parameter keys and
-duplicate pending keys are excluded.
+duplicate pending keys are excluded. Retry attempts survive a crash, so restart
+cannot reset a job's retry limit. Active jobs tied to a surrogate version other
+than the loaded checkpoint are cancelled and replaced.
+
+Each invocation copies its YAML to `configs/<sha256>_<name>.yaml` and
+records the full digest in `run_started`. Use that snapshot when auditing which
+configuration produced a segment of a resumed run.
 
 Safe changes for a resumed run generally include:
 

@@ -3,6 +3,34 @@
 This project follows semantic versioning while public APIs remain explicitly
 marked alpha.
 
+## 0.4.0 - 2026-07-11
+
+### Added
+
+- A finite-volume, three-material Darcy-flow inversion with 12 head sensors,
+  outlet flux, optional field artifacts, and configurable expensive-job delay.
+- Analytical Darcy consistency, material observability, exact inverse recovery,
+  and full three-rank MPI tests with 1.5-second solver jobs.
+- Exclusive POSIX run-directory locking and content-addressed configuration
+  snapshots recorded in the event journal.
+- GPL-3.0-or-later licensing, author and citation metadata, security guidance,
+  typed-package metadata, pinned GitHub Actions CI, and dependency updates.
+
+### Changed
+
+- Surrogate training and HMC now honor coordinator deadlines internally.
+- Restart replay preserves failed-job retry attempts and rejects active jobs
+  from any surrogate version inconsistent with the loaded checkpoint.
+- Runtime dependencies now declare supported minimum versions; SciPy remains an
+  optional dependency used only by the Darcy example.
+
+### Validation
+
+- The ordinary suite covers configuration, storage, replay, queueing, active
+  selection, surrogate training, HMC, callbacks, CLI, and recovery behavior.
+- MPI gates cover all four synthetic problems and the deliberately expensive
+  Darcy workflow, including persistence and checkpoint creation.
+
 ## 0.3.0 - 2026-07-10
 
 ### Added

@@ -1,7 +1,8 @@
-# Synthetic Examples
+# Examples
 
-The bundled examples are small enough for local MPI runs but exercise the same
-callback, storage, surrogate, HMC, and selection paths as external models.
+The bundled examples exercise the same callback, storage, surrogate, HMC, and
+selection paths as external models. Four are fast synthetic maps; the Darcy
+example adds a sparse finite-volume PDE solve and deliberately slow jobs.
 
 Validate all configurations:
 
@@ -98,6 +99,35 @@ modes. Multiple dispersed chains are essential.
 mpiexec -n 3 bayes-asi run examples/bimodal.yaml
 ```
 
+## Three-Material Darcy Flow
+
+Configuration: `examples/darcy_flow.yaml`
+
+The model solves steady saturated flow on the unit square:
+
+```text
+-div(k(x, theta) grad h(x)) = 0
+```
+
+It uses a cell-centered finite-volume discretization with a fixed head of one
+on the left, zero on the right, and no-flow top and bottom boundaries. Three
+log-conductivities control the background, a low-conductivity elliptical lens,
+and a diagonal high-conductivity channel. The 13 outputs are 12 interpolated
+head sensors and total outlet flux.
+
+The reference configuration uses a 96 by 96 grid and enforces a 1.5-second
+minimum callback duration. The delay makes scheduling, queue sizing, deadlines,
+and MPI concurrency realistic while keeping the numerical solve reproducible
+on ordinary development hardware.
+
+```bash
+mpiexec -n 3 bayes-asi run examples/darcy_flow.yaml
+```
+
+The numerical tests verify the exact linear solution for spatially constant
+conductivity, sensitivity to each material, and recovery of all three planted
+log-conductivities from a distant starting point.
+
 ## Tests
 
 Callback tests exercise all examples without MPI:
@@ -107,13 +137,21 @@ PYTHONPATH=src python3 -m unittest tests.test_examples
 ```
 
 They verify exact shapes, finite solver output, finite log probability, finite
-autograd gradients, bounds, and bimodal symmetry.
+autograd gradients, bounds, bimodal symmetry, and Darcy-flow consistency.
 
-The MPI integration test runs every example through the full system and
-requires completed samples plus a trained checkpoint:
+The MPI integration test runs all four synthetic examples through the full
+system and requires completed samples plus a trained checkpoint:
 
 ```bash
 BAYES_ASI_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_mpi_smoke
+```
+
+The opt-in Darcy MPI test runs three ranks with 1.5-second forward jobs. It
+requires completed samples, finite PDE outputs, a trained surrogate checkpoint,
+and a saved configuration snapshot:
+
+```bash
+BAYES_ASI_DARCY_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_darcy_mpi
 ```
 
 Use these examples as starting points for a separate problem package, not as

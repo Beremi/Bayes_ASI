@@ -20,6 +20,12 @@ python3 -m pip install -e .
 `mpi4py` must be built or installed against the MPI implementation used by
 `mpiexec`.
 
+Install the optional SciPy dependency to run the Darcy-flow example:
+
+```bash
+python3 -m pip install -e '.[examples]'
+```
+
 ## 2. Validate a Configuration
 
 Validation checks YAML structure, numeric constraints, unknown option names,
@@ -96,10 +102,11 @@ Run the same configuration again with the same `run.output_dir`:
 mpiexec -n 3 bayes-asi run examples/linear_gaussian.yaml
 ```
 
-The coordinator loads completed data, replays nonterminal queue events, and
-loads the newest valid compatible checkpoint. A corrupt newest checkpoint is
-logged and the next older valid checkpoint is tried. Duplicate parameters are
-not queued again.
+The coordinator acquires `run.lock`, loads completed data, replays nonterminal
+queue events, and loads the newest valid compatible checkpoint. A corrupt
+newest checkpoint is logged and the next older valid checkpoint is tried.
+Duplicate parameters are not queued again. Each invocation stores a
+content-addressed YAML copy under `configs/` and records its SHA-256 digest.
 
 See [Operations](operations.md) before changing configuration or callbacks for
 an existing run directory.

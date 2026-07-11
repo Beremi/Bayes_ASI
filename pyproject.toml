@@ -1,26 +1,52 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayes-asi"
-version = "0.3.0"
+version = "0.4.0"
 description = "Problem-agnostic adaptive surrogate Bayesian inversion with MPI solver workers"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+  {name = "Michal Béreš", email = "michal.beres@ugn.cas.cz"},
+]
+maintainers = [
+  {name = "Michal Béreš", email = "michal.beres@ugn.cas.cz"},
+]
+keywords = [
+  "active learning",
+  "Bayesian inversion",
+  "Hamiltonian Monte Carlo",
+  "inverse problems",
+  "MPI",
+  "surrogate models",
+]
 dependencies = [
-  "h5py",
-  "mpi4py",
-  "numpy",
-  "pyyaml",
-  "torch",
+  "h5py>=3.8",
+  "mpi4py>=3.1",
+  "numpy>=1.24",
+  "pyyaml>=6.0",
+  "torch>=2.1",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
+  "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering",
 ]
+
+[project.urls]
+Documentation = "https://github.com/Beremi/Bayes_ASI/tree/main/docs"
+Issues = "https://github.com/Beremi/Bayes_ASI/issues"
+Repository = "https://github.com/Beremi/Bayes_ASI"
 
 [project.optional-dependencies]
 examples = [
@@ -30,6 +56,7 @@ dev = [
   "build>=1.2",
   "mypy>=1.10",
   "ruff>=0.6",
+  "twine>=5.1",
 ]
 
 [project.scripts]
@@ -37,6 +64,9 @@ bayes-asi = "bayes_asi.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+bayes_asi = ["py.typed"]
 
 [tool.ruff]
 line-length = 120

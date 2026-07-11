@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use Bayes ASI, please cite this software."
+title: "Bayes ASI"
+type: software
+authors:
+  - family-names: "Béreš"
+    given-names: "Michal"
+    email: "michal.beres@ugn.cas.cz"
+repository-code: "https://github.com/Beremi/Bayes_ASI"
+url: "https://github.com/Beremi/Bayes_ASI"
+version: "0.4.0"
+date-released: 2026-07-11
+license: GPL-3.0-or-later

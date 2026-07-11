@@ -1,5 +1,9 @@
 # Bayes ASI
 
+[![CI](https://github.com/Beremi/Bayes_ASI/actions/workflows/ci.yml/badge.svg)](https://github.com/Beremi/Bayes_ASI/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
+[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-4c1.svg)](LICENSE)
+
 Bayes ASI is a problem-agnostic framework for adaptive surrogate Bayesian
 inversion of expensive black-box models. It evaluates a user-supplied forward
 solver with MPI workers, trains a differentiable PyTorch surrogate, samples the
@@ -22,12 +26,13 @@ wrappers remain in a separate problem package.
 - Posterior-plus-distance active selection with duplicate and queue repulsion.
 - Time budgets, solver retries, failure backoff, status reporting, and export.
 - Strict YAML validation with actionable errors for unknown or invalid options.
-- Synthetic examples for nonlinear, linear-Gaussian, bounded, and multimodal
-  inverse problems.
+- Reference problems spanning nonlinear, linear-Gaussian, bounded, multimodal,
+  and finite-volume Darcy-flow inversion.
 
 ## Requirements
 
 - Python 3.11 or newer.
+- A POSIX operating system with advisory file locking.
 - An MPI implementation and `mpi4py`.
 - PyTorch, NumPy, h5py, and PyYAML.
 - At least two MPI ranks for a run: one coordinator and one worker.
@@ -42,10 +47,16 @@ python3 -m venv .venv
 python3 -m pip install -e .
 ```
 
-Install quality and packaging tools as well:
+The Darcy-flow example additionally requires SciPy:
 
 ```bash
-python3 -m pip install -e '.[dev]'
+python3 -m pip install -e '.[examples]'
+```
+
+Install example, quality, and packaging tools for development:
+
+```bash
+python3 -m pip install -e '.[dev,examples]'
 ```
 
 ## Quick Start
@@ -128,14 +139,16 @@ The run directory contains:
 - `data.h5`: completed parameters, outputs, timing, worker, and sequence data.
 - `events.jsonl`: durable lifecycle, queue, training, and failure events.
 - `status.json`: atomically replaced operational status.
+- `configs/`: content-addressed snapshots of every configuration used.
 - `checkpoints/surrogate_v*.pt`: atomic surrogate checkpoints.
 - `posterior_batches/*.npz`: HMC samples used for active selection.
 - `workers/rank_*/job_*`: per-job working directories available to callbacks.
+- `run.lock`: advisory POSIX lock preventing concurrent coordinators.
 
 See [Architecture](docs/architecture.md) and [Operations](docs/operations.md)
 for lifecycle, restart, and failure semantics.
 
-## Synthetic Examples
+## Examples
 
 | Configuration | Purpose | Dimensions `(z, theta, y)` |
 | --- | --- | --- |
@@ -143,9 +156,11 @@ for lifecycle, restart, and failure semantics.
 | `examples/linear_gaussian.yaml` | Overdetermined linear-Gaussian inverse | `(2, 2, 3)` |
 | `examples/bounded_decay.yaml` | Uniform bounded parameters with a logistic transform | `(3, 3, 16)` |
 | `examples/bimodal.yaml` | Symmetric two-mode posterior | `(1, 1, 1)` |
+| `examples/darcy_flow.yaml` | Three-material finite-volume Darcy flow | `(3, 3, 13)` |
 
-All examples have callback/gradient tests and short end-to-end MPI tests. See
-[Examples](docs/examples.md) for model equations and suggested experiments.
+All examples have callback and gradient tests. The Darcy example also verifies
+material recovery and runs 1.5-second forward jobs through an end-to-end MPI
+test. See [Examples](docs/examples.md) for equations and suggested experiments.
 
 ## Documentation
 
@@ -155,7 +170,7 @@ All examples have callback/gradient tests and short end-to-end MPI tests. See
 - [Problem integration](docs/problem-integration.md)
 - [Architecture and algorithms](docs/architecture.md)
 - [Operations and troubleshooting](docs/operations.md)
-- [Synthetic examples](docs/examples.md)
+- [Examples](docs/examples.md)
 - [Python and CLI API](docs/api.md)
 - [Development and release](docs/development.md)
 - [Changelog](CHANGELOG.md)
@@ -168,10 +183,16 @@ Run the regular suite:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-Run the four-example MPI integration suite:
+Run the four synthetic examples through MPI:
 
 ```bash
 BAYES_ASI_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_mpi_smoke
+```
+
+Run the deliberately slower Darcy MPI test:
+
+```bash
+BAYES_ASI_DARCY_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_darcy_mpi
 ```
 
 Run quality and package checks:
@@ -185,7 +206,10 @@ python3 -m build
 ## Project Status
 
 Bayes ASI is alpha software. Run data and checkpoints are designed for robust
-restart, but public APIs and checkpoint formats may still evolve. Before a
-public release, the repository owner must add an explicit license and project
-ownership metadata; see the release checklist in
-[Development](docs/development.md).
+restart, but public APIs and checkpoint formats may still evolve.
+
+## License and Citation
+
+Copyright (C) 2026 Michal Béreš. Bayes ASI is distributed under the
+[GNU General Public License v3.0 or later](LICENSE). Citation metadata is
+provided in [CITATION.cff](CITATION.cff).
