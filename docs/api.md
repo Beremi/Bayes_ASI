@@ -12,12 +12,17 @@ from bayes_asi import (
     Posterior,
     SolverContext,
     __version__,
+    latin_hypercube,
     load_config,
 )
 ```
 
 The callback protocols use structural typing: a class does not need to inherit
 from a Bayes ASI base class if it implements the required methods.
+
+`latin_hypercube(rng, n_points, dimension)` returns a reproducible randomized
+design in the strict open unit cube. Runtime bootstrapping passes this design to
+`Posterior.prior_transform`; problem packages may also use it in callback tests.
 
 ## `SolverContext`
 
@@ -124,6 +129,7 @@ The most stable integration surface is:
 - YAML section names and documented options;
 - factory invocation with `config=` and configured keyword arguments;
 - `ForwardSolver`, `Posterior`, `SolverContext`, and `ForwardResult` contracts;
+- Latin-hypercube generation and the `Posterior.prior_transform` contract;
 - CLI commands documented above.
 
 Checkpoint internals, journal event payload details, lower-level classes, and

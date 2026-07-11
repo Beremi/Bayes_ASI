@@ -24,6 +24,7 @@ wrappers remain in a separate problem package.
 - Normalization-correct warm starts when new training data arrive.
 - Multi-chain HMC with dual-averaged step-size and diagonal-mass adaptation.
 - Posterior-plus-distance active selection with duplicate and queue repulsion.
+- Prior-distribution Latin-hypercube bootstrapping when no samples are available.
 - Time budgets, solver retries, failure backoff, status reporting, and export.
 - Strict YAML validation with actionable errors for unknown or invalid options.
 - Reference problems spanning nonlinear, linear-Gaussian, bounded, multimodal,
@@ -104,14 +105,16 @@ The posterior factory returns an object implementing:
 
 ```python
 initial_z(rng, n_chains) -> np.ndarray
+prior_transform(unit) -> np.ndarray
 z_to_theta(z: torch.Tensor) -> torch.Tensor
 log_prior_z(z: torch.Tensor) -> torch.Tensor
 log_likelihood(theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor
 ```
 
-`z` is the unconstrained HMC state. `theta` is the physical parameter vector
-sent to the forward solver. The transform and both log-density methods must be
-differentiable in PyTorch.
+`prior_transform` maps Latin-hypercube coordinates from the open unit cube to
+the latent prior. `initial_z` is used only to initialize HMC chains. `z` is the
+unconstrained HMC state, while `theta` is sent to the forward solver. The tensor
+transform and both log-density methods must be differentiable in PyTorch.
 
 See [Problem Integration](docs/problem-integration.md) for complete contracts,
 shape rules, validation advice, and a package template.

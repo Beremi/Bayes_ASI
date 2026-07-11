@@ -26,6 +26,13 @@ At startup rank 0:
 9. Imports optional initial data in one transaction.
 10. Queues missing prior-design points.
 
+For a fresh design, Bayes ASI creates one randomized point in every equal-width
+probability stratum of each latent dimension. The posterior's
+`prior_transform` maps this Latin hypercube to its prior distribution, and
+`z_to_theta` maps latent samples to physical solver parameters. The framework
+validates both transformed shapes and finite values. `initial_z` is reserved for
+HMC chain initialization and may therefore use dispersed or mode-aware starts.
+
 The run loop then:
 
 1. Receives every currently available worker result.
@@ -67,7 +74,8 @@ include:
 - surrogate: `surrogate_loaded`, `surrogate_trained`,
   `surrogate_train_failed`, `surrogate_checkpoint_load_failed`;
 - active learning: `active_batch_selected`, `active_selection_failed`;
-- import: `initial_sample_imported`, `initial_data_loaded`.
+- import: `initial_sample_imported`, `initial_data_loaded`;
+- design: `initial_design_generated` with method and requested/queued counts.
 
 A crash can leave one incomplete final JSON line. Replay ignores that line but
 rejects malformed earlier lines, since silently skipping history could revive

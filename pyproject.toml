@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayes-asi"
-version = "0.4.0"
+version = "0.5.0"
 description = "Problem-agnostic adaptive surrogate Bayesian inversion with MPI solver workers"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -115,6 +115,9 @@ class ProblemPosterior:
     def initial_z(self, rng, n_chains):
         ...
 
+    def prior_transform(self, unit):
+        ...
+
     def z_to_theta(self, z):
         ...
 
@@ -129,10 +132,18 @@ Shape rules:
 
 | Method | Input | Output |
 | --- | --- | --- |
-| `initial_z` | NumPy generator and row count N | finite NumPy array `(N, latent_dim)` |
+| `initial_z` | NumPy generator and HMC chain count N | finite NumPy array `(N, latent_dim)` |
+| `prior_transform` | strict open-unit array `(N, latent_dim)` | finite latent-prior array `(N, latent_dim)` |
 | `z_to_theta` | tensor `(N, latent_dim)` | tensor `(N, parameter_dim)` |
 | `log_prior_z` | tensor `(N, latent_dim)` | tensor `(N,)` |
 | `log_likelihood` | theta `(N, parameter_dim)`, prediction `(N, output_dim)` | tensor `(N,)` |
+
+`prior_transform` is the inverse-CDF or more general generative transform for
+the prior represented by `log_prior_z`. For independent priors it normally
+applies one marginal inverse CDF per column. Correlated priors may apply a
+Rosenblatt, copula, or matrix transform after consuming the independent unit
+coordinates. Bayes ASI cannot infer this transform reliably from a log density,
+so the problem package must provide it.
 
 `z_to_theta`, `log_prior_z`, and `log_likelihood` must preserve PyTorch's
 autograd graph. Do not convert their inputs to NumPy, call `.item()`, detach, or
@@ -146,6 +157,7 @@ that depend on `z` must be included.
 For independent bounds `(lower, upper)`, a stable logistic transform is:
 
 ```python
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -154,13 +166,18 @@ def z_to_theta(z, lower, upper):
     return lower + (upper - lower) * torch.sigmoid(z)
 
 
+def prior_transform(unit):
+    return np.log(unit) - np.log1p(-unit)
+
+
 def uniform_log_prior_z(z):
     # Uniform physical prior plus transform Jacobian, up to constants.
     return torch.sum(F.logsigmoid(z) + F.logsigmoid(-z), dim=-1)
 ```
 
-Initialize by drawing a unit-uniform value and applying the logit. See
-`bayes_asi.examples.bounded_decay` for a complete implementation.
+For a Latin hypercube `unit`, the logit produces the transformed-uniform latent
+prior; applying `z_to_theta` recovers a Latin hypercube over the bounded physical
+prior. See `bayes_asi.examples.bounded_decay` for a complete implementation.
 
 ## Likelihood Design
 
@@ -206,13 +223,15 @@ Non-finite values and row-count mismatches are rejected.
 Every problem package should test:
 
 1. Configured factory paths resolve and construct successfully.
-2. `initial_z` and `z_to_theta` produce exact configured shapes.
-3. Physical parameters satisfy bounds or other constraints.
-4. One solver evaluation produces finite exact-width output.
-5. Prior plus likelihood produces one finite value per row.
-6. `torch.autograd.grad(log_probability.sum(), z)` is finite.
-7. Missing solver assets produce an immediate actionable exception.
-8. A very short MPI run creates data, status, and a surrogate checkpoint.
+2. `prior_transform` maps Latin-hypercube quantiles to the intended prior with
+   exact configured shape.
+3. `initial_z` and `z_to_theta` produce exact configured shapes.
+4. Physical parameters satisfy bounds or other constraints.
+5. One solver evaluation produces finite exact-width output.
+6. Prior plus likelihood produces one finite value per row.
+7. `torch.autograd.grad(log_probability.sum(), z)` is finite.
+8. Missing solver assets produce an immediate actionable exception.
+9. A very short MPI run creates data, status, and a surrogate checkpoint.
 
 The bundled [synthetic tests](../tests/test_examples.py) are a compact model for
 callback tests, and [the MPI test](../tests/test_mpi_smoke.py) demonstrates the

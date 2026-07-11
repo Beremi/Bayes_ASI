@@ -130,9 +130,15 @@ every worker rank.
 | --- | ---: | --- | --- |
 | `n_points` | `16` | `>= 0` | Target number of completed plus queued/running initial evaluations before surrogate-driven selection. |
 
-The posterior's `initial_z` method generates these points, then `z_to_theta`
-maps them to solver parameters. Set zero when `initial_data` already supplies
-enough training rows and no additional prior design is desired.
+Bayes ASI generates a randomized Latin hypercube in the open unit cube. The
+posterior's `prior_transform` maps those probability coordinates into latent
+prior samples, then `z_to_theta` maps them to solver parameters. Set zero when
+existing or imported data already supply enough training rows and no additional
+prior design is desired.
+
+When no checkpoint or sufficient completed/imported data exist, the projected
+initial rows must reach `surrogate.min_train_samples`. The runtime rejects an
+undersized design immediately instead of waiting idly until the time budget.
 
 ## `surrogate`
 

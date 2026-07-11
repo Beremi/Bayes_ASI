@@ -23,7 +23,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 This covers configuration, storage and replay, queue invariants, active
 selection, surrogate normalization/checkpoints, HMC, runtime recovery, CLI,
-all example callbacks, and finite-volume Darcy-flow consistency and recovery.
+Latin-hypercube prior transforms, all example callbacks, and finite-volume
+Darcy-flow consistency and recovery.
 
 ### MPI integration
 

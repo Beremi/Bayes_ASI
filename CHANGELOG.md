@@ -3,6 +3,34 @@
 This project follows semantic versioning while public APIs remain explicitly
 marked alpha.
 
+## 0.5.0 - 2026-07-11
+
+### Added
+
+- Framework-owned randomized Latin-hypercube generation with exactly one point
+  per marginal probability stratum.
+- A required `Posterior.prior_transform(unit)` callback mapping open-unit-cube
+  quantiles to the latent prior.
+- Startup validation that rejects configurations unable to collect enough rows
+  for the first surrogate instead of idling until the time budget expires.
+- Prior-transform and stratification tests for Gaussian, bounded-uniform,
+  Darcy-flow, synthetic, and OAS TPBT posterior implementations.
+
+### Changed
+
+- `Posterior.initial_z` now initializes HMC chains only; it is no longer used to
+  generate the initial solver design.
+- Fresh designs are generated in prior probability space, transformed to latent
+  coordinates by the problem package, and then mapped to physical parameters.
+- Initial-design journal records identify `latin_hypercube_prior` as the design
+  method and record requested versus queued row counts.
+
+### Compatibility
+
+- Posterior callbacks must implement `prior_transform(unit)` before they can
+  bootstrap a run that needs initial solver evaluations. Existing completed
+  data and checkpoints remain compatible.
+
 ## 0.4.0 - 2026-07-11
 
 ### Added
