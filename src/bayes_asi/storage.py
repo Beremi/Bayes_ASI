@@ -177,11 +177,22 @@ class HDF5Store:
         digest = hashlib.sha256(content).hexdigest()
         directory = self.run_dir / "configs"
         directory.mkdir(parents=True, exist_ok=True)
-        destination = directory / f"{digest[:12]}_{source.name}"
-        if not destination.exists():
-            temporary = destination.with_suffix(destination.suffix + ".tmp")
-            temporary.write_bytes(content)
+        destination = directory / f"{digest}_{source.name}"
+        if destination.exists():
+            stored_digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if stored_digest != digest:
+                raise RuntimeError(f"configuration snapshot hash mismatch: {destination}")
+            return destination, digest
+
+        temporary = directory / f".{destination.name}.{os.getpid()}.tmp"
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return destination, digest
 
     def append_completed(

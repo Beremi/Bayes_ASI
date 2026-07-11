@@ -217,6 +217,16 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(digest, second_digest)
             self.assertEqual(first.read_text(encoding="utf-8"), "problem: test\n")
 
+            source.write_text("problem: changed\n", encoding="utf-8")
+            changed, changed_digest = store.snapshot_config(source)
+            self.assertNotEqual(changed, first)
+            self.assertNotEqual(changed_digest, digest)
+
+            source.write_text("problem: test\n", encoding="utf-8")
+            first.write_text("tampered\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "hash mismatch"):
+                store.snapshot_config(source)
+
 
 if __name__ == "__main__":
     unittest.main()

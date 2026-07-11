@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import least_squares
 
 from bayes_asi.examples.darcy_flow import (
     DEFAULT_TRUE_LOG_CONDUCTIVITY,
@@ -35,6 +36,22 @@ class DarcyFlowTests(unittest.TestCase):
             perturbed[index] += 0.2
             difference = np.linalg.norm(model.solve(perturbed).outputs - baseline)
             self.assertGreater(difference, 1e-3, f"material parameter {index} is not observable")
+
+    def test_material_parameters_are_recovered_from_exact_observations(self) -> None:
+        model = DarcyFlowModel(nx=36, ny=32)
+        target = model.solve(DEFAULT_TRUE_LOG_CONDUCTIVITY).outputs
+        scales = np.full(target.shape, 0.01)
+        scales[-1] = abs(target[-1]) * 0.03
+
+        result = least_squares(
+            lambda theta: (model.solve(theta).outputs - target) / scales,
+            x0=np.array([0.5, -3.5, -1.0]),
+            bounds=([-2.5, -4.0, -1.5], [1.0, 0.5, 2.0]),
+            max_nfev=50,
+        )
+
+        self.assertTrue(result.success, result.message)
+        self.assertTrue(np.allclose(result.x, DEFAULT_TRUE_LOG_CONDUCTIVITY, atol=1e-5))
 
     def test_solver_enforces_minimum_runtime_and_can_save_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

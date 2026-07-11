@@ -20,7 +20,7 @@ import numpy as np
     "set BAYES_ASI_DARCY_MPI_TEST=1 to run the expensive Darcy MPI test",
 )
 class DarcyMPITests(unittest.TestCase):
-    def test_material_inversion_with_one_second_solver_jobs(self) -> None:
+    def test_material_inversion_with_expensive_solver_jobs(self) -> None:
         mpiexec = shutil.which("mpiexec") or shutil.which("mpirun")
         if mpiexec is None:
             self.skipTest("mpiexec is not available")
