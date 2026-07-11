@@ -23,7 +23,7 @@ python3 -m pip install -e .
 Install the optional SciPy dependency to run the Darcy-flow example:
 
 ```bash
-python3 -m pip install -e '.[examples]'
+python3 -m pip install -e .
 ```
 
 ## 2. Validate a Configuration

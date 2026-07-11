@@ -19,7 +19,8 @@ wrappers remain in a separate problem package.
 ## Capabilities
 
 - MPI coordinator/worker execution for arbitrary Python solver callbacks.
-- Restartable HDF5 sample storage and an append-only JSONL event journal.
+- Restartable HDF5 storage for model targets and optional named rich arrays.
+- Standard-normal internal coordinates for design, surrogates, HMC, and selection.
 - Tanh multilayer-perceptron surrogates with input/output normalization.
 - Normalization-correct warm starts when new training data arrive.
 - Multi-chain HMC with dual-averaged step-size and diagonal-mass adaptation.
@@ -35,7 +36,7 @@ wrappers remain in a separate problem package.
 - Python 3.11 or newer.
 - A POSIX operating system with advisory file locking.
 - An MPI implementation and `mpi4py`.
-- PyTorch, NumPy, h5py, and PyYAML.
+- PyTorch, NumPy, SciPy, h5py, and PyYAML.
 - At least two MPI ranks for a run: one coordinator and one worker.
 
 ## Installation
@@ -48,16 +49,10 @@ python3 -m venv .venv
 python3 -m pip install -e .
 ```
 
-The Darcy-flow example additionally requires SciPy:
+Install quality and packaging tools for development:
 
 ```bash
-python3 -m pip install -e '.[examples]'
-```
-
-Install example, quality, and packaging tools for development:
-
-```bash
-python3 -m pip install -e '.[dev,examples]'
+python3 -m pip install -e '.[dev]'
 ```
 
 ## Quick Start
@@ -104,17 +99,16 @@ evaluate(theta: np.ndarray, context: SolverContext) -> ForwardResult
 The posterior factory returns an object implementing:
 
 ```python
-initial_z(rng, n_chains) -> np.ndarray
-prior_transform(unit) -> np.ndarray
-z_to_theta(z: torch.Tensor) -> torch.Tensor
-log_prior_z(z: torch.Tensor) -> torch.Tensor
+prior: PriorTransform
 log_likelihood(theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor
 ```
 
-`prior_transform` maps Latin-hypercube coordinates from the open unit cube to
-the latent prior. `initial_z` is used only to initialize HMC chains. `z` is the
-unconstrained HMC state, while `theta` is sent to the forward solver. The tensor
-transform and both log-density methods must be differentiable in PyTorch.
+The framework always uses `z ~ N(0, I)`. The reversible prior maps `z` to the
+physical `theta` sent to the solver and maps imported `theta` back to `z`.
+Built-in independent and Gaussian-copula priors support Uniform, Beta, Normal,
+Exponential, LogNormal, Gamma, Weibull, Student-t, Laplace, Logistic, and any
+compatible frozen SciPy continuous distribution. An optional `initial_z`
+method may provide dispersed or mode-aware HMC starts.
 
 See [Problem Integration](docs/problem-integration.md) for complete contracts,
 shape rules, validation advice, and a package template.
@@ -139,7 +133,8 @@ YAML + callbacks
 
 The run directory contains:
 
-- `data.h5`: completed parameters, outputs, timing, worker, and sequence data.
+- `data.h5`: standard-normal coordinates, physical parameters, dense model
+  outputs, timing, and optional named auxiliary arrays with presence masks.
 - `events.jsonl`: durable lifecycle, queue, training, and failure events.
 - `status.json`: atomically replaced operational status.
 - `configs/`: content-addressed snapshots of every configuration used.
@@ -157,7 +152,7 @@ for lifecycle, restart, and failure semantics.
 | --- | --- | --- |
 | `examples/synthetic.yaml` | Nonlinear unconstrained map | `(2, 2, 2)` |
 | `examples/linear_gaussian.yaml` | Overdetermined linear-Gaussian inverse | `(2, 2, 3)` |
-| `examples/bounded_decay.yaml` | Uniform bounded parameters with a logistic transform | `(3, 3, 16)` |
+| `examples/bounded_decay.yaml` | Uniform bounded parameters from a Gaussian reference | `(3, 3, 16)` |
 | `examples/bimodal.yaml` | Symmetric two-mode posterior | `(1, 1, 1)` |
 | `examples/darcy_flow.yaml` | Three-material finite-volume Darcy flow | `(3, 3, 13)` |
 
@@ -202,7 +197,7 @@ Run quality and package checks:
 
 ```bash
 ruff check .
-mypy src tests
+mypy src/bayes_asi
 python3 -m build
 ```
 

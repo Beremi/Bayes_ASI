@@ -3,6 +3,46 @@
 This project follows semantic versioning while public APIs remain explicitly
 marked alpha.
 
+## 0.6.0 - 2026-07-11
+
+### Added
+
+- Reversible standard-normal prior transports with independent and
+  Gaussian-copula composition.
+- Uniform, Beta, Normal, Exponential, LogNormal, Gamma, Weibull, Student-t,
+  Laplace, Logistic, serializable-spec, and generic SciPy continuous marginals.
+- Exact implicit autograd derivatives for inverse-CDF transports, including
+  Beta and Gamma distributions not implemented by PyTorch `icdf`.
+- Row-aligned named auxiliary solver arrays with optional presence, dynamic
+  field introduction, LZF compression, byte shuffling, Fletcher32 checksums,
+  transactional rollback, API loading, and NPZ export.
+- Automatic schema-one sample migration from physical parameters to stored
+  standard-normal coordinates.
+
+### Changed
+
+- Latin-hypercube design, surrogate inputs, HMC, and active-learning distances
+  now share an independent standard-normal coordinate system.
+- The framework owns the normalized `N(0, I)` latent density. A posterior now
+  exposes `prior.to_theta`, `prior.to_standard_normal`, and `log_likelihood`;
+  `initial_z` is an optional HMC-start hook.
+- `ForwardResult.outputs` is explicitly the dense model vector used by the
+  surrogate and likelihood. Rich saved values use `ForwardResult.auxiliary` and
+  never enter training automatically.
+- SciPy is a core BSD-licensed dependency because its mature continuous
+  distribution and inverse-CDF implementations underpin universal marginals.
+- Surrogate checkpoint format 3 records `input_space=standard_normal`.
+
+### Compatibility
+
+- Schema-one HDF5 data is upgraded in place by the configured prior. Existing
+  completed physical samples and model outputs remain reusable.
+- Physical-input surrogate checkpoints are deliberately rejected and retrained
+  from migrated samples; using them with standard-normal inputs would silently
+  represent the wrong model.
+- Posterior callbacks using `prior_transform`, `z_to_theta`, or `log_prior_z`
+  must migrate to the reversible `prior` object contract.
+
 ## 0.5.0 - 2026-07-11
 
 ### Added

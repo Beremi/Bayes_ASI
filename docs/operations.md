@@ -138,8 +138,10 @@ import h5py
 
 with h5py.File("runs/my_run/data.h5", "r") as h5:
     print(dict(h5.attrs))
+    print(h5["completed/z"].shape)
     print(h5["completed/theta"].shape)
     print(h5["completed/outputs"].shape)
+    print([group.attrs["name"] for group in h5["auxiliary"].values()])
 ```
 
 All datasets in `completed` must have the same first dimension. Bayes ASI

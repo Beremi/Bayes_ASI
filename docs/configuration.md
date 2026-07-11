@@ -104,7 +104,7 @@ All options are required and positive integers.
 
 | Option | Meaning |
 | --- | --- |
-| `latent_dim` | Width of unconstrained HMC variable `z`. |
+| `latent_dim` | Width of the independent standard-normal coordinate `z` used by design, surrogate, HMC, and selection. |
 | `parameter_dim` | Width of physical solver input `theta`. |
 | `output_dim` | Width of the flattened forward-model output and surrogate prediction. |
 
@@ -130,11 +130,11 @@ every worker rank.
 | --- | ---: | --- | --- |
 | `n_points` | `16` | `>= 0` | Target number of completed plus queued/running initial evaluations before surrogate-driven selection. |
 
-Bayes ASI generates a randomized Latin hypercube in the open unit cube. The
-posterior's `prior_transform` maps those probability coordinates into latent
-prior samples, then `z_to_theta` maps them to solver parameters. Set zero when
-existing or imported data already supply enough training rows and no additional
-prior design is desired.
+Bayes ASI generates a randomized Latin hypercube in the open unit cube, applies
+the standard-normal inverse CDF, and calls `posterior.prior.to_theta` to obtain
+solver parameters. Imported physical parameters are mapped back with
+`prior.to_standard_normal`. Set zero when existing or imported data already
+supply enough training rows and no additional prior design is desired.
 
 When no checkpoint or sufficient completed/imported data exist, the projected
 initial rows must reach `surrogate.min_train_samples`. The runtime rejects an
@@ -158,7 +158,7 @@ undersized design immediately instead of waiting idly until the time budget.
 | `retrain_from_scratch_every` | `5` | `>= 0` | Compare a scratch model every N training cycles. Zero disables scratch comparisons. |
 | `scratch_improvement_rel` | `0.02` | `[0, 1)` | Relative validation-loss improvement required to prefer scratch over warm start. |
 | `device` | `cpu` | nonempty PyTorch device | Training and HMC device, for example `cpu`, `cuda`, or `cuda:0`. CUDA requests fall back to CPU if CUDA is unavailable. |
-| `gradient_epsilon` | `1e-6` | `> 0` | Standard deviations below this threshold are replaced by one during normalization. |
+| `gradient_epsilon` | `1e-6` | `> 0` | Standard deviations below this threshold are replaced by one during standard-normal input or model-output normalization. |
 | `failure_retry_seconds` | `30.0` | `>= 0` | Backoff after a failed training attempt. A newly completed solver row permits an immediate retry. |
 
 Warm starts adjust the first and last linear layers when normalization changes,

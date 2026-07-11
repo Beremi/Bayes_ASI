@@ -9,7 +9,10 @@ from bayes_asi import (
     FactoryConfig,
     ForwardResult,
     ForwardSolver,
+    GaussianCopulaPrior,
+    IndependentPrior,
     Posterior,
+    PriorTransform,
     SolverContext,
     __version__,
     latin_hypercube,
@@ -21,8 +24,17 @@ The callback protocols use structural typing: a class does not need to inherit
 from a Bayes ASI base class if it implements the required methods.
 
 `latin_hypercube(rng, n_points, dimension)` returns a reproducible randomized
-design in the strict open unit cube. Runtime bootstrapping passes this design to
-`Posterior.prior_transform`; problem packages may also use it in callback tests.
+design in the strict open unit cube. Runtime bootstrapping maps it through the
+standard-normal inverse CDF and then through `Posterior.prior.to_theta`.
+
+Standard marginal constructors are available from `bayes_asi.priors`:
+
+```python
+from bayes_asi.priors import beta, exponential, gamma, lognormal, normal, uniform
+```
+
+The same module exports Weibull, Student-t, Laplace, Logistic, generic SciPy,
+standard-normal density/quantile, and serializable-spec helpers.
 
 ## `SolverContext`
 
@@ -45,11 +57,14 @@ ForwardResult(
     outputs: np.ndarray,
     metadata: dict[str, Any] = {},
     artifact_paths: list[str] = [],
+    auxiliary: dict[str, np.ndarray] = {},
 )
 ```
 
-`outputs` are flattened by the runtime to configured output width. Metadata and
-artifact paths are written to the `job_completed` event.
+`outputs` are flattened to the configured model-output width and are the sole
+surrogate target. Metadata and artifact paths are written to the completion
+event. Fixed-shape numeric/boolean `auxiliary` arrays are persisted separately
+with row presence masks and are not used by the surrogate or likelihood.
 
 ## Configuration API
 
@@ -75,7 +90,9 @@ implementation detail than the top-level callback API:
   and checkpoint loading.
 - `bayes_asi.hmc`: `HMCSampler` and `HMCResult`.
 - `bayes_asi.active`: `ActiveSelector` and `SelectedBatch`.
-- `bayes_asi.storage`: `HDF5Store`, `CompletedData`, and event replay helpers.
+- `bayes_asi.storage`: `HDF5Store`, `CompletedData`, `AuxiliaryData`, and event
+  replay helpers. `list_auxiliary_fields`, `load_auxiliary`, and
+  `load_all_auxiliary` provide typed access to rich arrays.
 - `bayes_asi.queue`: in-memory `Job` and `QueueState`.
 
 Their formats may evolve during alpha releases.
@@ -119,8 +136,11 @@ Parses and prints `status.json` as sorted, indented JSON.
 bayes-asi export RUN_DIR [--format npz|csv] [--output PATH]
 ```
 
-Default format is NPZ. Default output is `RUN_DIR/completed.FORMAT`. Parent
-directories are created and replacement is atomic.
+Default format is NPZ. NPZ includes `z`, `theta`, `model_outputs`, compatibility
+key `outputs`, and all auxiliary values/masks under `auxiliary/NAME` and
+`auxiliary_present/NAME`. CSV contains only `z`, physical parameters, dense
+model outputs, and operational scalar columns. Default output is
+`RUN_DIR/completed.FORMAT`; replacement is atomic.
 
 ## Compatibility
 
@@ -129,7 +149,7 @@ The most stable integration surface is:
 - YAML section names and documented options;
 - factory invocation with `config=` and configured keyword arguments;
 - `ForwardSolver`, `Posterior`, `SolverContext`, and `ForwardResult` contracts;
-- Latin-hypercube generation and the `Posterior.prior_transform` contract;
+- Latin-hypercube generation and the reversible standard-normal `PriorTransform` contract;
 - CLI commands documented above.
 
 Checkpoint internals, journal event payload details, lower-level classes, and

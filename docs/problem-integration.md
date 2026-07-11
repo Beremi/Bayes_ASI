@@ -76,12 +76,24 @@ class ModelSolver:
             outputs=np.asarray(outputs, dtype=float),
             metadata={"iterations": 12},
             artifact_paths=[str(context.work_dir / "model.log")],
+            auxiliary={
+                "experiments/source_a/full_curve": full_curve.astype(np.float32),
+                "diagnostics/residual_history": residual_history.astype(np.float32),
+            },
         )
 ```
 
 `theta` has shape `(problem.parameter_dim,)`. Returned outputs must contain
 exactly `problem.output_dim` finite numeric values. A plain array is accepted as
 a shorthand, but `ForwardResult` is preferred.
+
+`outputs` is the dense model vector trained by the surrogate and passed to
+`log_likelihood`. `auxiliary` is a mapping of logical names to fixed-shape
+numeric or boolean arrays. Auxiliary arrays are persisted row-by-row but never
+enter surrogate training or likelihood evaluation. A field may be absent from
+some rows; HDF5 stores a presence mask. Shape and dtype are fixed after a field
+first appears. Use metadata for small JSON values and `artifact_paths` for
+variable-size or externally managed files.
 
 `SolverContext` provides:
 
@@ -105,79 +117,99 @@ Bayes ASI rejects non-finite outputs even if the callback returns normally.
 Metadata and artifact paths should be JSON-compatible. NumPy scalars/arrays and
 `Path` values are normalized automatically in journal records.
 
-## Posterior Contract
+## Posterior And Prior Contracts
 
-The posterior defines HMC in unconstrained coordinates and likelihood
-evaluation against surrogate outputs.
+Bayes ASI owns the inference reference distribution: every internal coordinate
+has prior `z ~ N(0, I)`. A posterior supplies a reversible physical-prior
+transport and the likelihood:
 
 ```python
+from dataclasses import dataclass
+
+import torch
+
+from bayes_asi.priors import IndependentPrior, beta, lognormal, normal, uniform
+
+
+@dataclass(slots=True)
 class ProblemPosterior:
-    def initial_z(self, rng, n_chains):
-        ...
-
-    def prior_transform(self, unit):
-        ...
-
-    def z_to_theta(self, z):
-        ...
-
-    def log_prior_z(self, z):
-        ...
+    observations: torch.Tensor
+    prior: IndependentPrior
 
     def log_likelihood(self, theta, y_pred):
-        ...
+        residual = y_pred - self.observations.to(y_pred)
+        return -0.5 * torch.sum(residual**2, dim=-1)
+
+
+prior = IndependentPrior(
+    [
+        uniform(0.1, 2.0),
+        beta(2.0, 5.0, low=-1.0, high=3.0),
+        normal(mean=0.0, sd=2.0),
+        lognormal(log_mean=0.2, log_sd=0.5),
+    ]
+)
 ```
 
-Shape rules:
+`IndependentPrior` also accepts serializable specifications such as
+`{"distribution": "exponential", "rate": 2.0}`. Built-in marginals are
+Uniform, Beta, Normal, Exponential, LogNormal, Gamma, Weibull, Student-t,
+Laplace, and Logistic. `scipy_marginal(frozen_distribution)` supports other
+continuous SciPy distributions with `cdf`, `sf`, `ppf`, `isf`, and `logpdf`.
 
-| Method | Input | Output |
-| --- | --- | --- |
-| `initial_z` | NumPy generator and HMC chain count N | finite NumPy array `(N, latent_dim)` |
-| `prior_transform` | strict open-unit array `(N, latent_dim)` | finite latent-prior array `(N, latent_dim)` |
-| `z_to_theta` | tensor `(N, latent_dim)` | tensor `(N, parameter_dim)` |
-| `log_prior_z` | tensor `(N, latent_dim)` | tensor `(N,)` |
-| `log_likelihood` | theta `(N, parameter_dim)`, prediction `(N, output_dim)` | tensor `(N,)` |
+The `PriorTransform` shape contract is:
 
-`prior_transform` is the inverse-CDF or more general generative transform for
-the prior represented by `log_prior_z`. For independent priors it normally
-applies one marginal inverse CDF per column. Correlated priors may apply a
-Rosenblatt, copula, or matrix transform after consuming the independent unit
-coordinates. Bayes ASI cannot infer this transform reliably from a log density,
-so the problem package must provide it.
+| Member | Contract |
+| --- | --- |
+| `latent_dim` | width of the independent standard-normal reference |
+| `parameter_dim` | width of physical solver input |
+| `to_theta(z)` | differentiable tensor `(N, latent_dim)` to `(N, parameter_dim)` |
+| `to_standard_normal(theta)` | NumPy array `(..., parameter_dim)` to `(..., latent_dim)` |
 
-`z_to_theta`, `log_prior_z`, and `log_likelihood` must preserve PyTorch's
-autograd graph. Do not convert their inputs to NumPy, call `.item()`, detach, or
-wrap computed tensors with `torch.tensor(...)`.
+For independent marginals, Bayes ASI composes the standard-normal CDF with each
+target inverse CDF. `GaussianCopulaPrior` additionally supplies correlated
+marginals. A problem can implement `PriorTransform` directly for a Rosenblatt,
+normalizing-flow, matrix, or other reversible generative transport.
 
-Constants independent of `z` may be omitted from log densities. Jacobian terms
-that depend on `z` must be included.
+The framework evaluates
+
+```text
+theta = posterior.prior.to_theta(z)
+y_hat = surrogate(z)
+log posterior = log N(z; 0, I) + posterior.log_likelihood(theta, y_hat)
+```
+
+No user Jacobian or latent log-prior callback is needed: the requested physical
+prior is induced by pushing the Gaussian reference through the transport. The
+built-in SciPy quantile transport supplies the exact implicit derivative
+`d theta / d z = normal_pdf(z) / prior_pdf(theta)` to PyTorch autograd.
+
+`log_likelihood` and custom `to_theta` implementations must preserve the
+PyTorch graph. An optional `initial_z(rng, n_chains)` method may return finite
+shape `(n_chains, latent_dim)` for dispersed or mode-aware starts; otherwise the
+framework draws independent standard normals.
 
 ## Bounded Parameters
 
-For independent bounds `(lower, upper)`, a stable logistic transform is:
+A bounded independent prior requires no hand-written logistic transform or
+Jacobian:
 
 ```python
-import numpy as np
-import torch
-import torch.nn.functional as F
+from bayes_asi.priors import IndependentPrior, uniform
 
-
-def z_to_theta(z, lower, upper):
-    return lower + (upper - lower) * torch.sigmoid(z)
-
-
-def prior_transform(unit):
-    return np.log(unit) - np.log1p(-unit)
-
-
-def uniform_log_prior_z(z):
-    # Uniform physical prior plus transform Jacobian, up to constants.
-    return torch.sum(F.logsigmoid(z) + F.logsigmoid(-z), dim=-1)
+prior = IndependentPrior(
+    [
+        uniform(0.5, 2.5),
+        uniform(0.2, 2.0),
+        uniform(-0.2, 0.5),
+    ]
+)
 ```
 
-For a Latin hypercube `unit`, the logit produces the transformed-uniform latent
-prior; applying `z_to_theta` recovers a Latin hypercube over the bounded physical
-prior. See `bayes_asi.examples.bounded_decay` for a complete implementation.
+For an empty run, a Latin hypercube is generated in independent prior
+probability coordinates, mapped to standard-normal `z`, and then transported to
+physical parameters. Each bounded marginal therefore retains exactly one
+initial point per prior-probability stratum.
 
 ## Likelihood Design
 
@@ -210,28 +242,34 @@ def load_initial_data(config, dataset_path):
     return {
         "theta": data["theta"],       # (N, parameter_dim)
         "outputs": data["outputs"],   # (N, output_dim)
+        "auxiliary": {
+            "experiments/source_a/full_curve": data["full_curve"],  # (N, ...)
+        },
         "metadata": {"source": dataset_path},
     }
 ```
 
-Rows are rounded with `active_learning.duplicate_round_decimals` and duplicate
-parameters are skipped. Accepted rows are appended in one HDF5 transaction.
-Non-finite values and row-count mismatches are rejected.
+Physical rows are mapped back through `prior.to_standard_normal`, rounded with
+`active_learning.duplicate_round_decimals`, and duplicate parameters are
+skipped. Accepted rows and their selected auxiliary rows are appended in one
+HDF5 transaction. Non-finite model values and row-count mismatches are rejected.
 
 ## Callback Test Checklist
 
 Every problem package should test:
 
 1. Configured factory paths resolve and construct successfully.
-2. `prior_transform` maps Latin-hypercube quantiles to the intended prior with
-   exact configured shape.
-3. `initial_z` and `z_to_theta` produce exact configured shapes.
+2. `prior.to_theta` and `prior.to_standard_normal` round-trip representative
+   values with exact configured shapes.
+3. A Latin hypercube retains one point in every prior-probability stratum.
 4. Physical parameters satisfy bounds or other constraints.
 5. One solver evaluation produces finite exact-width output.
-6. Prior plus likelihood produces one finite value per row.
+6. Standard-normal prior plus likelihood produces one finite value per row.
 7. `torch.autograd.grad(log_probability.sum(), z)` is finite.
-8. Missing solver assets produce an immediate actionable exception.
-9. A very short MPI run creates data, status, and a surrogate checkpoint.
+8. Auxiliary data is persisted with its intended shape and presence mask but
+   does not change the surrogate output width.
+9. Missing solver assets produce an immediate actionable exception.
+10. A very short MPI run creates data, status, and a surrogate checkpoint.
 
 The bundled [synthetic tests](../tests/test_examples.py) are a compact model for
 callback tests, and [the MPI test](../tests/test_mpi_smoke.py) demonstrates the

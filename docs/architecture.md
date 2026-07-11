@@ -17,21 +17,23 @@ At startup rank 0:
 
 1. Loads and validates YAML, then acquires an exclusive run-directory lock.
 2. Creates or validates the run-directory HDF5 schema.
-3. Loads completed sample keys and count.
-4. Reads valid journal events, ignoring only a truncated final line.
-5. Tries checkpoints newest first until a compatible valid model loads.
-6. Replays queued, nonterminal, nonduplicate jobs, preserving retry attempts.
-7. Cancels active jobs whose source version differs from the loaded surrogate.
-8. Saves a content-addressed configuration snapshot and journals its SHA-256.
-9. Imports optional initial data in one transaction.
-10. Queues missing prior-design points.
+3. Migrates schema-one physical samples to standard-normal coordinates when
+   needed, using the configured reversible prior.
+4. Loads completed sample keys and count.
+5. Reads valid journal events, ignoring only a truncated final line.
+6. Tries checkpoints newest first until a compatible valid model loads.
+7. Replays queued, nonterminal, nonduplicate jobs, preserving retry attempts.
+8. Cancels active jobs whose source version differs from the loaded surrogate.
+9. Saves a content-addressed configuration snapshot and journals its SHA-256.
+10. Imports optional initial data in one transaction.
+11. Queues missing prior-design points.
 
 For a fresh design, Bayes ASI creates one randomized point in every equal-width
-probability stratum of each latent dimension. The posterior's
-`prior_transform` maps this Latin hypercube to its prior distribution, and
-`z_to_theta` maps latent samples to physical solver parameters. The framework
-validates both transformed shapes and finite values. `initial_z` is reserved for
-HMC chain initialization and may therefore use dispersed or mode-aware starts.
+prior-probability stratum, maps it through the standard-normal inverse CDF, and
+then applies `posterior.prior.to_theta`. Thus design, surrogate training, HMC,
+and active-distance calculations share independent `N(0, I)` coordinates while
+workers receive physical parameters. Optional `initial_z` is reserved for HMC
+chain initialization and may use dispersed or mode-aware starts.
 
 The run loop then:
 
@@ -45,14 +47,37 @@ The run loop then:
 The completed-row count is cached in memory. Full HDF5 arrays are loaded only
 when training or selection needs them, rather than on every 20 ms loop pass.
 
+## Design Rationale
+
+The prior layer follows the measure-transport formulation of coupling a simple
+reference measure, commonly a standard Gaussian, to a target distribution; see
+[Marzouk et al., *An introduction to sampling via measure transport*](https://arxiv.org/abs/1602.05023).
+For scalar marginals, SciPy's documented
+[`rv_continuous` interface](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.rv_continuous.html)
+provides CDF, inverse-CDF, survival, and density operations across its standard
+continuous distributions. Beta inversion uses SciPy's
+[`betaincinv`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.betaincinv.html),
+which wraps the established Boost implementation.
+
+Rich result storage remains in HDF5 because the runtime already has one writer
+and needs atomic row-aligned extension. h5py documents that
+[chunked datasets are resizable](https://docs.h5py.org/en/stable/high/dataset.html)
+and support transparent filters. LZF, byte shuffling, and Fletcher32 checksums
+give fast lossless storage without another runtime dependency. An analysis
+package may expose these groups as xarray objects later; xarray's
+[`DataTree`](https://docs.xarray.dev/en/latest/user-guide/data-structures.html)
+is suited to heterogeneous hierarchy, but it is not needed in the execution
+path.
+
 ## Persistence
 
 ### HDF5
 
 `data.h5` stores a `completed` group with equal-length datasets:
 
+- `z`: `(N, latent_dim)` float64 standard-normal coordinates;
 - `theta`: `(N, parameter_dim)` float64;
-- `outputs`: `(N, output_dim)` float64;
+- `outputs`: `(N, output_dim)` float64 dense model values used by the surrogate;
 - `elapsed_s`: `(N,)` float64;
 - `worker_rank`: `(N,)` int64;
 - `job_sequence`: `(N,)` int64;
@@ -60,8 +85,12 @@ when training or selection needs them, rather than on every 20 ms loop pass.
 
 File attributes record schema version and dimensions. Opening an existing run
 with different dimensions or inconsistent dataset lengths fails immediately.
-Batch append resizes all datasets, writes all values, and rolls dimensions back
-if any write fails.
+An `auxiliary` group stores each logical field as a chunked, losslessly
+compressed `values` dataset and a row-aligned boolean `present` mask. Logical
+names may be hierarchical, for example `experiments/source_a/full_curve`.
+Fields can appear after a run starts; previous rows are marked absent. Shapes
+and dtypes cannot change after first use. Batch append resizes completed and
+auxiliary datasets together and rolls all dimensions back if any write fails.
 
 ### Event Journal
 
@@ -84,19 +113,21 @@ terminal jobs.
 ### Checkpoints
 
 Surrogate checkpoints contain architecture, state dictionary, normalization,
-validation loss, model version, and training-sample count. Saves use a temporary
-file followed by `os.replace`.
+standard-normal input-space identity, validation loss, model version, and
+training-sample count. Saves use a temporary file followed by `os.replace`.
 
-On restart, corrupt or dimension-incompatible checkpoints are logged and the
-next older checkpoint is attempted. Legacy checkpoints without a training-row
-count are loaded but trigger an immediate update, preventing completed rows
-from being incorrectly treated as already learned.
+On restart, corrupt, dimension-incompatible, or legacy physical-input
+checkpoints are logged and the next older checkpoint is attempted. Physical
+checkpoints are retrained because silently applying them to `z` would represent
+a different function.
 
 ## Surrogate Model
 
 The surrogate is a configurable sequence of linear layers and tanh activations,
-with a final linear output. Training standardizes each parameter and output
-component. Near-constant dimensions use scale one to avoid division by zero.
+with a final linear output. Its input is the standard-normal coordinate `z`,
+and its target is only `completed/outputs`; auxiliary fields are never included.
+Training standardizes each coordinate and model-output component. Near-constant
+dimensions use scale one to avoid division by zero.
 
 Training uses Adam, optional weight decay, deterministic split/order seeds,
 `ReduceLROnPlateau`, early stopping, and restoration of the best epoch.
@@ -112,9 +143,9 @@ warm model only when it exceeds the configured relative improvement.
 HMC operates in latent coordinates `z` and evaluates:
 
 ```text
-theta = posterior.z_to_theta(z)
-y_hat = surrogate(theta)
-log p(z | data) = posterior.log_prior_z(z)
+theta = posterior.prior.to_theta(z)
+y_hat = surrogate(z)
+log p(z | data) = log N(z; 0, I)
                   + posterior.log_likelihood(theta, y_hat)
 ```
 
@@ -147,7 +178,8 @@ score = posterior_weight * zscore(log_posterior)
       + distance_weight  * zscore(nearest_scaled_distance)
 ```
 
-Distances are scaled by candidate-pool standard deviation per parameter.
+Distances are scaled by candidate-pool standard deviation per standard-normal
+coordinate.
 Queued, running, and newly selected points have stronger repulsion through
 `queued_repulsion_radius_multiplier`.
 

@@ -7,7 +7,7 @@ Create a local environment with runtime and development dependencies:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python3 -m pip install -e '.[dev,examples]'
+python3 -m pip install -e '.[dev]'
 ```
 
 The project uses the standard library `unittest` runner, Ruff, mypy, and the

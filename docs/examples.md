@@ -67,9 +67,9 @@ The physical parameters are amplitude, decay rate, and offset:
 y(t) = amplitude * exp(-rate * t) + offset
 ```
 
-at 16 fixed time points. Each parameter has finite lower and upper bounds. HMC
-uses unconstrained `z`, mapped by a logistic transform. The transformed uniform
-prior includes the required Jacobian term.
+at 16 fixed time points. Each parameter has finite lower and upper bounds. A
+Gaussian-reference inverse-CDF transport maps `z` to the uniform physical
+prior; no user Jacobian is required.
 
 This is the most representative template for bounded physical calibration and
 vector/curve outputs.
@@ -120,6 +120,10 @@ minimum callback duration. The delay makes scheduling, queue sizing, deadlines,
 and MPI concurrency realistic while keeping the numerical solve reproducible
 on ordinary development hardware.
 
+With `solver.kwargs.save_fields: true`, the 13 sensor/flux values remain the
+surrogate target while complete head and conductivity fields are stored as
+`darcy/head` and `darcy/conductivity` auxiliary arrays.
+
 ```bash
 mpiexec -n 3 bayes-asi run examples/darcy_flow.yaml
 ```
@@ -147,8 +151,9 @@ BAYES_ASI_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_mpi_smoke
 ```
 
 The opt-in Darcy MPI test runs three ranks with 1.5-second forward jobs. It
-requires completed samples, finite PDE outputs, a trained surrogate checkpoint,
-and a saved configuration snapshot:
+requires completed samples, finite PDE outputs, a trained standard-normal-input
+surrogate, persisted full-field auxiliary arrays, and a saved configuration
+snapshot:
 
 ```bash
 BAYES_ASI_DARCY_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_darcy_mpi
