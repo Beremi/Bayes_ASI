@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from bayes_asi.config import HMCConfig
+from bayes_asi.priors import standard_normal_log_prob
 from bayes_asi.types import DifferentiableSurrogate, Posterior
 
 
@@ -124,7 +125,7 @@ class HMCSampler:
         z = np.concatenate(samples, axis=0)
         log_prob = np.concatenate(logps, axis=0)
         with torch.no_grad():
-            theta = self.posterior.z_to_theta(torch.as_tensor(z, dtype=torch.float32, device=self.device))
+            theta = self.posterior.prior.to_theta(torch.as_tensor(z, dtype=torch.float32, device=self.device))
         return HMCResult(
             z=z,
             theta=theta.detach().cpu().numpy(),
@@ -138,9 +139,9 @@ class HMCSampler:
 
     def _log_prob_and_grad(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         z_var = z.detach().clone().requires_grad_(True)
-        theta = self.posterior.z_to_theta(z_var)
-        y_pred = self.surrogate(theta)
-        log_prob = self.posterior.log_prior_z(z_var) + self.posterior.log_likelihood(theta, y_pred)
+        theta = self.posterior.prior.to_theta(z_var)
+        y_pred = self.surrogate(z_var)
+        log_prob = standard_normal_log_prob(z_var) + self.posterior.log_likelihood(theta, y_pred)
         log_prob = log_prob.reshape(z_var.shape[0])
         grad = torch.autograd.grad(log_prob.sum(), z_var)[0]
         log_prob = torch.nan_to_num(log_prob, nan=-float("inf"), posinf=-float("inf"), neginf=-float("inf"))

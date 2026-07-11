@@ -13,9 +13,10 @@ class ActiveSelectorTests(unittest.TestCase):
         selector = ActiveSelector(ActiveLearningConfig(distance_weight=1.0, posterior_weight=0.0))
         candidates = np.array([[0.05, 0.0], [2.0, 0.0], [0.1, 0.0]])
         selected = selector.select(
+            candidate_z=candidates,
             candidate_theta=candidates,
             candidate_log_prob=np.zeros(3),
-            existing_theta=np.array([[0.0, 0.0]]),
+            existing_z=np.array([[0.0, 0.0]]),
             count=1,
         )
         self.assertEqual(selected.theta.shape, (1, 2))
@@ -25,9 +26,10 @@ class ActiveSelectorTests(unittest.TestCase):
         selector = ActiveSelector(ActiveLearningConfig(distance_weight=1.0, posterior_weight=0.0))
         candidates = np.array([[5.0, 0.0], [5.1, 0.0], [-5.0, 0.0]])
         selected = selector.select(
+            candidate_z=candidates,
             candidate_theta=candidates,
             candidate_log_prob=np.zeros(3),
-            existing_theta=np.array([[0.0, 0.0]]),
+            existing_z=np.array([[0.0, 0.0]]),
             count=2,
         )
         self.assertEqual(selected.theta.shape, (2, 2))
@@ -43,10 +45,11 @@ class ActiveSelectorTests(unittest.TestCase):
         )
         candidates = np.array([[0.2, 0.0], [2.2, 0.0]])
         selected = selector.select(
+            candidate_z=candidates,
             candidate_theta=candidates,
             candidate_log_prob=np.zeros(2),
-            existing_theta=np.array([[0.0, 0.0]]),
-            queued_theta=np.array([[2.0, 0.0]]),
+            existing_z=np.array([[0.0, 0.0]]),
+            queued_z=np.array([[2.0, 0.0]]),
             count=1,
         )
         self.assertEqual(selected.theta.shape, (1, 2))
@@ -62,9 +65,10 @@ class ActiveSelectorTests(unittest.TestCase):
         )
         candidates = np.array([[16.0, 0.0], [10.0, 0.0], [-5.0, 0.0]])
         selected = selector.select(
+            candidate_z=candidates,
             candidate_theta=candidates,
             candidate_log_prob=np.zeros(3),
-            existing_theta=np.array([[0.0, 0.0]]),
+            existing_z=np.array([[0.0, 0.0]]),
             count=2,
         )
         self.assertEqual(selected.theta.shape, (2, 2))
@@ -79,18 +83,21 @@ class ActiveSelectorTests(unittest.TestCase):
         selector = ActiveSelector(ActiveLearningConfig())
         with self.assertRaisesRegex(ValueError, "finite"):
             selector.select(
+                candidate_z=np.array([[np.nan, 0.0]]),
                 candidate_theta=np.array([[np.nan, 0.0]]),
                 candidate_log_prob=np.array([0.0]),
-                existing_theta=np.empty((0, 2)),
+                existing_z=np.empty((0, 2)),
                 count=1,
             )
 
     def test_negative_infinite_log_probability_is_not_selected(self) -> None:
         selector = ActiveSelector(ActiveLearningConfig(distance_weight=0.0, posterior_weight=1.0))
+        candidates = np.array([[0.0], [1.0], [2.0]])
         selected = selector.select(
-            candidate_theta=np.array([[0.0], [1.0], [2.0]]),
+            candidate_z=candidates,
+            candidate_theta=candidates,
             candidate_log_prob=np.array([-np.inf, -1.0, 0.0]),
-            existing_theta=np.empty((0, 1)),
+            existing_z=np.empty((0, 1)),
             count=2,
         )
         self.assertTrue(np.array_equal(selected.theta.reshape(-1), [2.0, 1.0]))

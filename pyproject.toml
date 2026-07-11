@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bayes-asi"
-version = "0.5.0"
+version = "0.6.0"
 description = "Problem-agnostic adaptive surrogate Bayesian inversion with MPI solver workers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,7 @@ dependencies = [
   "mpi4py>=3.1",
   "numpy>=1.24",
   "pyyaml>=6.0",
+  "scipy>=1.11",
   "torch>=2.1",
 ]
 classifiers = [
@@ -49,9 +50,7 @@ Issues = "https://github.com/Beremi/Bayes_ASI/issues"
 Repository = "https://github.com/Beremi/Bayes_ASI"
 
 [project.optional-dependencies]
-examples = [
-  "scipy>=1.11",
-]
+examples = []
 dev = [
   "build>=1.2",
   "mypy>=1.10",

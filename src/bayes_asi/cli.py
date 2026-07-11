@@ -85,8 +85,13 @@ def _export(run_dir: Path, export_format: str, output_path: Path | None) -> int:
     data_path = run_dir / "data.h5"
     if not data_path.exists():
         raise FileNotFoundError(f"missing HDF5 data file: {data_path}")
-    parameter_dim, output_dim = _read_dims(data_path)
-    store = HDF5Store(run_dir, parameter_dim=parameter_dim, output_dim=output_dim)
+    latent_dim, parameter_dim, output_dim = _read_dims(data_path)
+    store = HDF5Store(
+        run_dir,
+        parameter_dim=parameter_dim,
+        output_dim=output_dim,
+        latent_dim=latent_dim,
+    )
     data = store.load_completed()
     if output_path is None:
         output_path = run_dir / f"completed.{export_format}"
@@ -94,17 +99,23 @@ def _export(run_dir: Path, export_format: str, output_path: Path | None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if export_format == "npz":
         temporary = output_path.with_suffix(".tmp.npz")
-        np.savez_compressed(
-            temporary,
-            theta=data.theta,
-            outputs=data.outputs,
-            elapsed_s=data.elapsed_s,
-            worker_rank=data.worker_rank,
-            job_sequence=data.job_sequence,
-        )
+        payload = {
+            "z": data.z,
+            "theta": data.theta,
+            "model_outputs": data.outputs,
+            "outputs": data.outputs,
+            "elapsed_s": data.elapsed_s,
+            "worker_rank": data.worker_rank,
+            "job_sequence": data.job_sequence,
+        }
+        for name, auxiliary in store.load_all_auxiliary().items():
+            payload[f"auxiliary/{name}"] = auxiliary.values
+            payload[f"auxiliary_present/{name}"] = auxiliary.present
+        np.savez_compressed(temporary, **payload)  # type: ignore[arg-type]
         os.replace(temporary, output_path)
     else:
-        header = [f"theta_{i}" for i in range(data.theta.shape[1])]
+        header = [f"z_{i}" for i in range(data.z.shape[1])]
+        header += [f"theta_{i}" for i in range(data.theta.shape[1])]
         header += [f"output_{i}" for i in range(data.outputs.shape[1])]
         header += ["elapsed_s", "worker_rank", "job_sequence"]
         temporary = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -113,7 +124,8 @@ def _export(run_dir: Path, export_format: str, output_path: Path | None) -> int:
             writer.writerow(header)
             for i in range(data.n):
                 writer.writerow(
-                    data.theta[i].tolist()
+                    data.z[i].tolist()
+                    + data.theta[i].tolist()
                     + data.outputs[i].tolist()
                         + [float(data.elapsed_s[i]), int(data.worker_rank[i]), int(data.job_sequence[i])]
                     )
@@ -122,11 +134,12 @@ def _export(run_dir: Path, export_format: str, output_path: Path | None) -> int:
     return 0
 
 
-def _read_dims(data_path: Path) -> tuple[int, int]:
+def _read_dims(data_path: Path) -> tuple[int, int, int]:
     import h5py
 
     with h5py.File(data_path, "r") as h5:
-        return int(h5.attrs["parameter_dim"]), int(h5.attrs["output_dim"])
+        parameter_dim = int(h5.attrs["parameter_dim"])
+        return int(h5.attrs.get("latent_dim", parameter_dim)), parameter_dim, int(h5.attrs["output_dim"])
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ import math
 import os
 import time
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -15,10 +16,11 @@ from bayes_asi.active import ActiveSelector
 from bayes_asi.config import AppConfig, build_factory_object, load_config
 from bayes_asi.design import latin_hypercube
 from bayes_asi.hmc import HMCResult, HMCSampler
+from bayes_asi.priors import standard_normal_icdf
 from bayes_asi.queue import Job, QueueState
 from bayes_asi.storage import HDF5Store, exclusive_run_lock, replay_queue_events, stable_theta_key
 from bayes_asi.surrogate import SurrogateModel, SurrogateTrainer
-from bayes_asi.types import ForwardResult, SolverContext
+from bayes_asi.types import ForwardResult, PriorTransform, SolverContext
 
 TAG_WORK = 10
 TAG_STOP = 11
@@ -53,12 +55,33 @@ class Coordinator:
         self.available_workers = set(self.worker_ranks)
         self.rng = np.random.default_rng(config.run.seed)
         self.posterior = build_factory_object(config.posterior, config)
-        self.store = HDF5Store(config.run.output_dir, config.problem.parameter_dim, config.problem.output_dim)
+        candidate_prior = getattr(self.posterior, "prior", None)
+        if candidate_prior is None or not callable(getattr(candidate_prior, "to_theta", None)) or not callable(
+            getattr(candidate_prior, "to_standard_normal", None)
+        ):
+            raise TypeError("posterior must expose a reversible prior with to_theta and to_standard_normal")
+        self.prior = cast(PriorTransform, candidate_prior)
+        if int(self.prior.latent_dim) != config.problem.latent_dim:
+            raise ValueError(
+                f"posterior prior latent_dim={self.prior.latent_dim}, expected {config.problem.latent_dim}"
+            )
+        if int(self.prior.parameter_dim) != config.problem.parameter_dim:
+            raise ValueError(
+                f"posterior prior parameter_dim={self.prior.parameter_dim}, expected {config.problem.parameter_dim}"
+            )
+        self.store = HDF5Store(
+            config.run.output_dir,
+            config.problem.parameter_dim,
+            config.problem.output_dim,
+            latent_dim=config.problem.latent_dim,
+        )
+        self._migrate_latent_coordinates()
+        self._validate_stored_coordinate_pairs()
         self.queue = QueueState()
         self.selector = ActiveSelector(config.active_learning)
         self.trainer = SurrogateTrainer(
             config.surrogate,
-            config.problem.parameter_dim,
+            config.problem.latent_dim,
             config.problem.output_dim,
             seed=config.run.seed,
         )
@@ -73,6 +96,49 @@ class Coordinator:
         self.next_sequence = 0
         self.known_keys: set[tuple[float, ...]] = set()
         self._restore_state()
+
+    def _migrate_latent_coordinates(self) -> None:
+        if not self.store.latent_coordinates_pending():
+            return
+        completed = self.store.load_completed(allow_pending_latent=True)
+        z = np.asarray(self.prior.to_standard_normal(completed.theta), dtype=np.float64)
+        expected = (completed.n, self.config.problem.latent_dim)
+        if z.shape != expected or not np.all(np.isfinite(z)):
+            raise ValueError(
+                f"prior.to_standard_normal returned invalid migration shape {z.shape}; expected {expected}"
+            )
+        self.store.complete_latent_migration(z)
+        self.store.append_event(
+            "storage_schema_migrated",
+            {"schema_version": 2, "rows": completed.n, "coordinate_space": "standard_normal"},
+        )
+
+    def _validate_stored_coordinate_pairs(self) -> None:
+        completed = self.store.load_completed()
+        if completed.n == 0:
+            return
+        sample_count = min(completed.n, 512)
+        indices = np.linspace(0, completed.n - 1, sample_count, dtype=int)
+        self._validate_coordinate_pairs(
+            completed.z[indices],
+            completed.theta[indices],
+            context="stored samples",
+        )
+
+    def _validate_coordinate_pairs(self, z: np.ndarray, theta: np.ndarray, *, context: str) -> None:
+        z = np.asarray(z, dtype=np.float64).reshape(-1, self.config.problem.latent_dim)
+        theta = np.asarray(theta, dtype=np.float64).reshape(-1, self.config.problem.parameter_dim)
+        if z.shape[0] != theta.shape[0] or not np.all(np.isfinite(z)) or not np.all(np.isfinite(theta)):
+            raise ValueError(f"{context} has invalid standard-normal or physical coordinates")
+        with torch.no_grad():
+            expected = self.prior.to_theta(torch.as_tensor(z, dtype=torch.float32)).detach().cpu().numpy()
+        if expected.shape != theta.shape or not np.all(np.isfinite(expected)):
+            raise ValueError(f"configured prior returned invalid physical coordinates for {context}")
+        if not np.allclose(expected, theta, rtol=2e-5, atol=2e-6):
+            maximum_error = float(np.max(np.abs(expected - theta)))
+            raise ValueError(
+                f"{context} is inconsistent with the configured prior; maximum theta error={maximum_error:.6g}"
+            )
 
     def run(self) -> None:
         start = time.monotonic()
@@ -163,8 +229,17 @@ class Coordinator:
         outputs = np.asarray(initial["outputs"], dtype=float).reshape(-1, self.config.problem.output_dim)
         if theta.shape[0] != outputs.shape[0]:
             raise ValueError("initial_data theta and outputs row counts differ")
+        z = np.asarray(self.prior.to_standard_normal(theta), dtype=float)
+        expected_z_shape = (theta.shape[0], self.config.problem.latent_dim)
+        if z.shape != expected_z_shape or not np.all(np.isfinite(z)):
+            raise ValueError(
+                f"prior.to_standard_normal must return finite shape {expected_z_shape}, got {z.shape}"
+            )
+        auxiliary_rows = self._initial_auxiliary_rows(initial.get("auxiliary"), theta.shape[0])
+        z_rows: list[np.ndarray] = []
         rows: list[np.ndarray] = []
         output_rows: list[np.ndarray] = []
+        stored_rows: list[Mapping[str, np.ndarray]] = []
         sequences: list[int] = []
         skipped = 0
         for i, row in enumerate(theta):
@@ -175,14 +250,17 @@ class Coordinator:
             sequence = self.next_sequence
             self.next_sequence += 1
             self.known_keys.add(key)
+            z_rows.append(z[i])
             rows.append(row)
             output_rows.append(outputs[i])
+            stored_rows.append(auxiliary_rows[i])
             sequences.append(sequence)
 
         imported = len(rows)
         first_index = self.completed_count
         if imported:
             first_index = self.store.append_completed_batch(
+                z=np.vstack(z_rows),
                 theta=np.vstack(rows),
                 outputs=np.vstack(output_rows),
                 elapsed_s=np.zeros(imported),
@@ -190,16 +268,18 @@ class Coordinator:
                 job_sequence=np.asarray(sequences, dtype=np.int64),
                 started_at=np.zeros(imported),
                 finished_at=np.zeros(imported),
+                auxiliary=stored_rows,
             )
             self.completed_count += imported
         metadata = initial.get("metadata", {})
-        for offset, (row, sequence) in enumerate(zip(rows, sequences, strict=True)):
+        for offset, (z_row, row, sequence) in enumerate(zip(z_rows, rows, sequences, strict=True)):
             self.store.append_event(
                 "initial_sample_imported",
                 {
                     "job_id": f"initial_{sequence:08d}",
                     "job_sequence": sequence,
                     "hdf5_index": first_index + offset,
+                    "z": z_row.tolist(),
                     "theta": row.tolist(),
                     "metadata": metadata,
                 },
@@ -210,9 +290,26 @@ class Coordinator:
                 "rows": int(theta.shape[0]),
                 "imported": imported,
                 "skipped_existing": skipped,
+                "auxiliary_fields": sorted(str(name) for name in (initial.get("auxiliary") or {})),
                 "metadata": metadata,
             },
         )
+
+    @staticmethod
+    def _initial_auxiliary_rows(raw: Any, rows: int) -> list[dict[str, np.ndarray]]:
+        result: list[dict[str, np.ndarray]] = [{} for _ in range(rows)]
+        if raw is None:
+            return result
+        if not isinstance(raw, Mapping):
+            raise TypeError("initial_data auxiliary must be a mapping of names to row-aligned arrays")
+        for raw_name, raw_values in raw.items():
+            name = str(raw_name)
+            values = np.asarray(raw_values)
+            if values.ndim == 0 or values.shape[0] != rows:
+                raise ValueError(f"initial_data auxiliary field {name!r} must have leading dimension {rows}")
+            for index in range(rows):
+                result[index][name] = values[index]
+        return result
 
     def _restore_state(self) -> None:
         completed = self.store.load_completed()
@@ -225,8 +322,10 @@ class Coordinator:
         for checkpoint in self.store.checkpoint_paths(newest_first=True):
             try:
                 candidate = SurrogateModel.load(checkpoint, device=self.trainer.device)
-                if candidate.parameter_dim != self.config.problem.parameter_dim:
-                    raise ValueError("checkpoint parameter dimension does not match the configuration")
+                if candidate.input_dim != self.config.problem.latent_dim:
+                    raise ValueError("checkpoint input dimension does not match the latent configuration")
+                if candidate.input_space != "standard_normal":
+                    raise ValueError("checkpoint was trained in physical rather than standard-normal coordinates")
                 if candidate.output_dim != self.config.problem.output_dim:
                     raise ValueError("checkpoint output dimension does not match the configuration")
                 if candidate.training_samples is not None and candidate.training_samples > completed.n:
@@ -266,11 +365,7 @@ class Coordinator:
             max_sequence = max(max_sequence, sequence)
             source = str(job_data.get("source", "replayed"))
             source_version = self._source_surrogate_version(source)
-            incompatible_source = (
-                self.surrogate_version > 0
-                and source_version is not None
-                and source_version != self.surrogate_version
-            )
+            incompatible_source = source_version is not None and source_version != self.surrogate_version
             if incompatible_source:
                 stale_jobs.append({"job_id": str(job_data["job_id"]), "sequence": sequence})
                 self.store.append_event(
@@ -286,10 +381,23 @@ class Coordinator:
                     },
                 )
                 continue
+            theta = np.asarray(job_data["theta"], dtype=float).reshape(self.config.problem.parameter_dim)
+            raw_z = job_data.get("z")
+            z = (
+                np.asarray(self.prior.to_standard_normal(theta.reshape(1, -1)), dtype=float).reshape(
+                    self.config.problem.latent_dim
+                )
+                if raw_z is None
+                else np.asarray(raw_z, dtype=float).reshape(self.config.problem.latent_dim)
+            )
+            if not np.all(np.isfinite(z)):
+                raise ValueError(f"replayed job {job_data['job_id']} has non-finite standard-normal coordinates")
+            self._validate_coordinate_pairs(z.reshape(1, -1), theta.reshape(1, -1), context="replayed job")
             job = Job(
                 job_id=str(job_data["job_id"]),
                 sequence=sequence,
-                theta=np.asarray(job_data["theta"], dtype=float),
+                theta=theta,
+                z=z,
                 attempt=int(job_data.get("attempt", 0)),
                 source=source,
                 queued_at=time.time(),
@@ -321,10 +429,10 @@ class Coordinator:
         missing = target - self.completed_count - self.queue.in_system_count
         if missing <= 0:
             return
-        theta = self._draw_initial_theta(missing)
+        z, theta = self._draw_initial_points(missing)
         queued = 0
-        for row in theta:
-            queued += self._queue_theta(row, source="initial") is not None
+        for z_row, theta_row in zip(z, theta, strict=True):
+            queued += self._queue_theta(theta_row, z=z_row, source="initial") is not None
         self.store.append_event(
             "initial_design_generated",
             {
@@ -332,29 +440,24 @@ class Coordinator:
                 "requested_count": missing,
                 "queued_count": queued,
                 "latent_dim": self.config.problem.latent_dim,
+                "coordinate_space": "standard_normal",
             },
         )
 
     def _draw_initial_theta(self, n: int) -> np.ndarray:
+        return self._draw_initial_points(n)[1]
+
+    def _draw_initial_points(self, n: int) -> tuple[np.ndarray, np.ndarray]:
         unit = latin_hypercube(self.rng, n, self.config.problem.latent_dim)
-        prior_transform = getattr(self.posterior, "prior_transform", None)
-        if not callable(prior_transform):
-            raise TypeError(
-                "posterior must implement prior_transform(unit) for Latin-hypercube initial design"
-            )
-        z = prior_transform(unit)
-        z = np.asarray(z, dtype=np.float32)
+        z = np.asarray(standard_normal_icdf(unit), dtype=np.float32)
         if z.shape != (n, self.config.problem.latent_dim) or not np.all(np.isfinite(z)):
-            raise ValueError(
-                "posterior.prior_transform must return finite shape "
-                f"{(n, self.config.problem.latent_dim)}, got {z.shape}"
-            )
+            raise ValueError(f"standard-normal design has invalid shape {z.shape}")
         with torch.no_grad():
-            theta = self.posterior.z_to_theta(torch.as_tensor(z, device=self.trainer.device))
+            theta = self.prior.to_theta(torch.as_tensor(z, device=self.trainer.device))
         theta_np = theta.detach().cpu().numpy().reshape(n, self.config.problem.parameter_dim)
         if not np.all(np.isfinite(theta_np)):
-            raise ValueError("posterior.z_to_theta returned non-finite initial parameters")
-        return theta_np
+            raise ValueError("posterior prior returned non-finite initial parameters")
+        return z, theta_np
 
     @staticmethod
     def _source_surrogate_version(source: str) -> int | None:
@@ -366,10 +469,26 @@ class Coordinator:
         except ValueError:
             return None
 
-    def _queue_theta(self, theta: np.ndarray, *, source: str, attempt: int = 0) -> Job | None:
+    def _queue_theta(
+        self,
+        theta: np.ndarray,
+        *,
+        source: str,
+        z: np.ndarray | None = None,
+        attempt: int = 0,
+    ) -> Job | None:
         theta = np.asarray(theta, dtype=float).reshape(self.config.problem.parameter_dim)
         if not np.all(np.isfinite(theta)):
             raise ValueError("cannot queue non-finite parameters")
+        if z is None:
+            z = np.asarray(self.prior.to_standard_normal(theta.reshape(1, -1)), dtype=float).reshape(
+                self.config.problem.latent_dim
+            )
+        else:
+            z = np.asarray(z, dtype=float).reshape(self.config.problem.latent_dim)
+        if not np.all(np.isfinite(z)):
+            raise ValueError("cannot queue non-finite standard-normal coordinates")
+        self._validate_coordinate_pairs(z.reshape(1, -1), theta.reshape(1, -1), context="queued job")
         key = stable_theta_key(theta, self.config.active_learning.duplicate_round_decimals)
         if key in self.known_keys:
             return None
@@ -379,6 +498,7 @@ class Coordinator:
             job_id=f"job_{sequence:08d}",
             sequence=sequence,
             theta=theta,
+            z=z,
             attempt=attempt,
             source=source,
             queued_at=time.time(),
@@ -390,6 +510,7 @@ class Coordinator:
             {
                 "job_id": job.job_id,
                 "job_sequence": job.sequence,
+                "z": z.tolist(),
                 "theta": theta.tolist(),
                 "attempt": attempt,
                 "source": source,
@@ -484,8 +605,11 @@ class Coordinator:
         elapsed = float(result.get("elapsed_s", 0.0))
         self.queue.update_solve_time(elapsed)
         if result.get("ok"):
+            if job.z is None:
+                raise RuntimeError(f"completed job {job.job_id} is missing standard-normal coordinates")
             outputs = np.asarray(result["outputs"], dtype=float).reshape(self.config.problem.output_dim)
             index = self.store.append_completed(
+                z=job.z,
                 theta=job.theta,
                 outputs=outputs,
                 elapsed_s=elapsed,
@@ -493,6 +617,7 @@ class Coordinator:
                 job_sequence=job.sequence,
                 started_at=float(result.get("started_at", time.time())),
                 finished_at=float(result.get("finished_at", time.time())),
+                auxiliary=result.get("auxiliary", {}),
             )
             self.completed_count += 1
             self.next_training_attempt_at = 0.0
@@ -506,6 +631,7 @@ class Coordinator:
                     "elapsed_s": elapsed,
                     "metadata": result.get("metadata", {}),
                     "artifact_paths": result.get("artifact_paths", []),
+                    "auxiliary_fields": sorted(result.get("auxiliary", {})),
                 },
             )
         else:
@@ -528,6 +654,7 @@ class Coordinator:
                     job_id=job.job_id,
                     sequence=job.sequence,
                     theta=job.theta,
+                    z=job.z,
                     attempt=job.attempt + 1,
                     source=job.source,
                     queued_at=time.time(),
@@ -551,7 +678,7 @@ class Coordinator:
         version = self.surrogate_version + 1
         try:
             warm = self.trainer.train(
-                completed.theta,
+                completed.z,
                 completed.outputs,
                 version=version,
                 previous=self.surrogate,
@@ -567,7 +694,7 @@ class Coordinator:
             )
             if run_scratch:
                 scratch = self.trainer.train(
-                    completed.theta,
+                    completed.z,
                     completed.outputs,
                     version=version,
                     previous=None,
@@ -632,34 +759,37 @@ class Coordinator:
             return
         completed = self.store.load_completed()
         queued_parts = []
-        pending = self.queue.pending_theta()
-        running = self.queue.running_theta()
+        pending = self.queue.pending_z()
+        running = self.queue.running_z()
         if pending.size:
-            queued_parts.append(pending.reshape(-1, self.config.problem.parameter_dim))
+            queued_parts.append(pending.reshape(-1, self.config.problem.latent_dim))
         if running.size:
-            queued_parts.append(running.reshape(-1, self.config.problem.parameter_dim))
-        queued = np.vstack(queued_parts) if queued_parts else np.empty((0, self.config.problem.parameter_dim))
+            queued_parts.append(running.reshape(-1, self.config.problem.latent_dim))
+        queued = np.vstack(queued_parts) if queued_parts else np.empty((0, self.config.problem.latent_dim))
         try:
             hmc_result = self._draw_surrogate_posterior(deadline)
             candidate_count = min(self.config.active_learning.candidate_pool_size, hmc_result.theta.shape[0])
             if hmc_result.theta.shape[0] > candidate_count:
                 indices = self.rng.choice(hmc_result.theta.shape[0], size=candidate_count, replace=False)
+                candidate_z = hmc_result.z[indices]
                 candidate_theta = hmc_result.theta[indices]
                 candidate_logp = hmc_result.log_prob[indices]
             else:
+                candidate_z = hmc_result.z
                 candidate_theta = hmc_result.theta
                 candidate_logp = hmc_result.log_prob
             posterior_path = self._save_hmc_batch(hmc_result)
             selected = self.selector.select(
+                candidate_z=candidate_z,
                 candidate_theta=candidate_theta,
                 candidate_log_prob=candidate_logp,
-                existing_theta=completed.theta,
-                queued_theta=queued,
+                existing_z=completed.z,
+                queued_z=queued,
                 count=count,
                 known_keys=self.known_keys,
             )
-            for row in selected.theta:
-                self._queue_theta(row, source=f"surrogate_v{self.surrogate_version}")
+            for z_row, theta_row in zip(selected.z, selected.theta, strict=True):
+                self._queue_theta(theta_row, z=z_row, source=f"surrogate_v{self.surrogate_version}")
             if selected.theta.shape[0] == 0:
                 self.next_active_attempt_at = now + self.config.active_learning.failure_retry_seconds
             else:
@@ -696,7 +826,13 @@ class Coordinator:
             raise RuntimeError("surrogate is not available")
         expected_shape = (self.config.hmc.n_chains, self.config.problem.latent_dim)
         if self.last_hmc_z is None or self.last_hmc_z.shape != expected_shape:
-            initial_z = self.posterior.initial_z(self.rng, self.config.hmc.n_chains)
+            initializer = getattr(self.posterior, "initial_z", None)
+            if callable(initializer):
+                initial_z = np.asarray(initializer(self.rng, self.config.hmc.n_chains), dtype=np.float32)
+            else:
+                initial_z = self.rng.normal(size=expected_shape).astype(np.float32)
+            if initial_z.shape != expected_shape or not np.all(np.isfinite(initial_z)):
+                raise ValueError(f"posterior initial_z must return finite shape {expected_shape}")
         else:
             initial_z = self.last_hmc_z
         sampler = HMCSampler(
@@ -755,6 +891,7 @@ class Coordinator:
             "surrogate_version": self.surrogate_version if self.surrogate is not None else None,
             "surrogate_val_loss": self.surrogate.val_loss if self.surrogate is not None else None,
             "surrogate_training_samples": self.surrogate.training_samples if self.surrogate is not None else None,
+            "surrogate_input_space": "standard_normal",
         }
         self.store.update_status(status)
 
@@ -808,6 +945,8 @@ def _evaluate_worker_job(
         outputs = np.asarray(forward_result.outputs, dtype=float).reshape(config.problem.output_dim)
         if not np.all(np.isfinite(outputs)):
             raise ValueError("solver returned non-finite outputs")
+        auxiliary = {str(name): np.asarray(value) for name, value in forward_result.auxiliary.items()}
+        HDF5Store._normalize_auxiliary_batch([auxiliary], 1)
         finished_at = time.time()
         return {
             "ok": True,
@@ -815,6 +954,7 @@ def _evaluate_worker_job(
             "job_sequence": int(payload["job_sequence"]),
             "theta": theta,
             "outputs": outputs,
+            "auxiliary": auxiliary,
             "metadata": forward_result.metadata,
             "artifact_paths": forward_result.artifact_paths,
             "worker_rank": rank,

@@ -48,6 +48,7 @@ class SurrogateModel:
         val_loss: float,
         device: str,
         training_samples: int | None = None,
+        input_space: str = "standard_normal",
     ) -> None:
         self.network = network.to(device).eval()
         self.normalization = normalization
@@ -56,51 +57,59 @@ class SurrogateModel:
         self.val_loss = float(val_loss)
         self.device = device
         self.training_samples = None if training_samples is None else int(training_samples)
+        self.input_space = str(input_space)
+
+    @property
+    def input_dim(self) -> int:
+        return int(self.normalization.x_mean.numel())
 
     @property
     def parameter_dim(self) -> int:
-        return int(self.normalization.x_mean.numel())
+        """Compatibility alias for checkpoints created with physical inputs."""
+
+        return self.input_dim
 
     @property
     def output_dim(self) -> int:
         return int(self.normalization.y_mean.numel())
 
-    def forward_torch(self, theta: torch.Tensor) -> torch.Tensor:
-        theta = theta.to(dtype=torch.float32, device=self.device)
-        original_shape = theta.shape
-        theta_2d = theta.reshape(-1, self.parameter_dim)
-        x_norm = (theta_2d - self.normalization.x_mean) / self.normalization.x_std
+    def forward_torch(self, z: torch.Tensor) -> torch.Tensor:
+        z = z.to(dtype=torch.float32, device=self.device)
+        original_shape = z.shape
+        z_2d = z.reshape(-1, self.input_dim)
+        x_norm = (z_2d - self.normalization.x_mean) / self.normalization.x_std
         y_norm = self.network(x_norm)
         y = y_norm * self.normalization.y_std + self.normalization.y_mean
         return y.reshape(*original_shape[:-1], self.output_dim)
 
-    def __call__(self, theta: torch.Tensor) -> torch.Tensor:
-        return self.forward_torch(theta)
+    def __call__(self, z: torch.Tensor) -> torch.Tensor:
+        return self.forward_torch(z)
 
-    def predict_numpy(self, theta: np.ndarray) -> np.ndarray:
+    def predict_numpy(self, z: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            theta_tensor = torch.as_tensor(theta, dtype=torch.float32, device=self.device)
-            return self.forward_torch(theta_tensor).detach().cpu().numpy()
+            z_tensor = torch.as_tensor(z, dtype=torch.float32, device=self.device)
+            return self.forward_torch(z_tensor).detach().cpu().numpy()
 
-    def jacobian_numpy(self, theta: np.ndarray) -> np.ndarray:
-        theta_tensor = torch.as_tensor(theta, dtype=torch.float32, device=self.device).reshape(1, -1)
-        theta_tensor.requires_grad_(True)
-        y = self.forward_torch(theta_tensor).reshape(-1)
+    def jacobian_numpy(self, z: np.ndarray) -> np.ndarray:
+        z_tensor = torch.as_tensor(z, dtype=torch.float32, device=self.device).reshape(1, -1)
+        z_tensor.requires_grad_(True)
+        y = self.forward_torch(z_tensor).reshape(-1)
         rows: list[torch.Tensor] = []
         for i in range(y.numel()):
-            grad = torch.autograd.grad(y[i], theta_tensor, retain_graph=True)[0]
+            grad = torch.autograd.grad(y[i], z_tensor, retain_graph=True)[0]
             rows.append(grad.reshape(-1).detach().cpu())
         return torch.stack(rows, dim=0).numpy()
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "format_version": 2,
+            "format_version": 3,
             "version": self.version,
             "val_loss": self.val_loss,
             "training_samples": self.training_samples,
             "hidden_layers": self.hidden_layers,
-            "parameter_dim": self.parameter_dim,
+            "input_dim": self.input_dim,
+            "input_space": self.input_space,
             "output_dim": self.output_dim,
             "state_dict": self.network.state_dict(),
             "x_mean": self.normalization.x_mean.detach().cpu(),
@@ -122,7 +131,6 @@ class SurrogateModel:
             "version",
             "val_loss",
             "hidden_layers",
-            "parameter_dim",
             "output_dim",
             "state_dict",
             "x_mean",
@@ -133,8 +141,11 @@ class SurrogateModel:
         missing = sorted(required - set(payload))
         if missing:
             raise ValueError(f"checkpoint {path} is missing: {', '.join(missing)}")
+        input_dim = payload.get("input_dim", payload.get("parameter_dim"))
+        if input_dim is None:
+            raise ValueError(f"checkpoint {path} is missing: input_dim")
         network = TanhMLP(
-            int(payload["parameter_dim"]),
+            int(input_dim),
             int(payload["output_dim"]),
             [int(value) for value in payload["hidden_layers"]],
         )
@@ -157,6 +168,7 @@ class SurrogateModel:
                 if payload.get("training_samples") is not None
                 else None
             ),
+            input_space=str(payload.get("input_space", "physical_parameters")),
         )
 
 
@@ -172,9 +184,9 @@ class TrainResult:
 
 
 class SurrogateTrainer:
-    def __init__(self, config: SurrogateConfig, parameter_dim: int, output_dim: int, seed: int) -> None:
+    def __init__(self, config: SurrogateConfig, input_dim: int, output_dim: int, seed: int) -> None:
         self.config = config
-        self.parameter_dim = int(parameter_dim)
+        self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
         self.seed = int(seed)
         requested = torch.device(config.device)
@@ -184,7 +196,7 @@ class SurrogateTrainer:
 
     def train(
         self,
-        theta: np.ndarray,
+        coordinates: np.ndarray,
         outputs: np.ndarray,
         *,
         version: int,
@@ -192,22 +204,22 @@ class SurrogateTrainer:
         force_scratch: bool = False,
         deadline_monotonic: float | None = None,
     ) -> TrainResult:
-        theta = np.asarray(theta, dtype=np.float32).reshape(-1, self.parameter_dim)
+        coordinates = np.asarray(coordinates, dtype=np.float32).reshape(-1, self.input_dim)
         outputs = np.asarray(outputs, dtype=np.float32).reshape(-1, self.output_dim)
-        if theta.shape[0] != outputs.shape[0]:
-            raise ValueError("theta and outputs row counts differ")
-        if theta.shape[0] < 2:
+        if coordinates.shape[0] != outputs.shape[0]:
+            raise ValueError("coordinates and outputs row counts differ")
+        if coordinates.shape[0] < 2:
             raise ValueError("at least two completed samples are required to train a surrogate")
-        if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(outputs)):
-            raise ValueError("theta and outputs must contain only finite values")
+        if not np.all(np.isfinite(coordinates)) or not np.all(np.isfinite(outputs)):
+            raise ValueError("coordinates and outputs must contain only finite values")
 
         seed = self.seed + int(version) * 1009 + (17 if force_scratch else 0)
         rng = np.random.default_rng(seed)
         generator = torch.Generator(device=self.device)
         generator.manual_seed(seed)
 
-        x_mean = torch.as_tensor(theta.mean(axis=0), dtype=torch.float32, device=self.device)
-        x_std_np = theta.std(axis=0)
+        x_mean = torch.as_tensor(coordinates.mean(axis=0), dtype=torch.float32, device=self.device)
+        x_std_np = coordinates.std(axis=0)
         x_std_np[x_std_np < self.config.gradient_epsilon] = 1.0
         x_std = torch.as_tensor(x_std_np, dtype=torch.float32, device=self.device)
         y_mean = torch.as_tensor(outputs.mean(axis=0), dtype=torch.float32, device=self.device)
@@ -218,12 +230,14 @@ class SurrogateTrainer:
 
         with torch.random.fork_rng():
             torch.manual_seed(seed)
-            network = TanhMLP(self.parameter_dim, self.output_dim, self.config.hidden_layers)
+            network = TanhMLP(self.input_dim, self.output_dim, self.config.hidden_layers)
         warm_started = False
         if previous is not None and not force_scratch:
             warm_started = True
-            if previous.parameter_dim != self.parameter_dim or previous.output_dim != self.output_dim:
+            if previous.input_dim != self.input_dim or previous.output_dim != self.output_dim:
                 raise ValueError("previous surrogate dimensions do not match the trainer")
+            if previous.input_space != "standard_normal":
+                raise ValueError("previous surrogate was not trained in standard-normal coordinates")
             if previous.hidden_layers != self.config.hidden_layers:
                 warm_started = False
             else:
@@ -231,12 +245,12 @@ class SurrogateTrainer:
                 self._adapt_normalization(network, previous.normalization, normalization)
         network.to(self.device).train()
 
-        x = torch.as_tensor(theta, dtype=torch.float32, device=self.device)
+        x = torch.as_tensor(coordinates, dtype=torch.float32, device=self.device)
         y = torch.as_tensor(outputs, dtype=torch.float32, device=self.device)
         x_norm = (x - x_mean) / x_std
         y_norm = (y - y_mean) / y_std
 
-        train_idx, val_idx = self._split_indices(theta.shape[0], rng)
+        train_idx, val_idx = self._split_indices(coordinates.shape[0], rng)
         optimizer = torch.optim.Adam(
             network.parameters(),
             lr=self.config.learning_rate,
@@ -319,7 +333,8 @@ class SurrogateTrainer:
             version=version,
             val_loss=best_metric,
             device=self.device,
-            training_samples=theta.shape[0],
+            training_samples=coordinates.shape[0],
+            input_space="standard_normal",
         )
         return TrainResult(
             model=model,

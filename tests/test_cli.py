@@ -53,6 +53,7 @@ class CLITests(unittest.TestCase):
             run_dir = Path(tmp) / "run"
             store = HDF5Store(run_dir, 2, 1)
             store.append_completed(
+                z=np.array([-0.5, 0.5]),
                 theta=np.array([1.0, 2.0]),
                 outputs=np.array([3.0]),
                 elapsed_s=0.5,
@@ -60,6 +61,7 @@ class CLITests(unittest.TestCase):
                 job_sequence=4,
                 started_at=1.0,
                 finished_at=1.5,
+                auxiliary={"experiments/source_a": np.array([4.0, 5.0], dtype=np.float32)},
             )
             npz_path = Path(tmp) / "exports" / "samples.npz"
             csv_path = Path(tmp) / "exports" / "samples.csv"
@@ -68,10 +70,16 @@ class CLITests(unittest.TestCase):
                 main(["export", str(run_dir), "--format", "csv", "--output", str(csv_path)])
 
             with np.load(npz_path) as data:
+                self.assertTrue(np.array_equal(data["z"], [[-0.5, 0.5]]))
                 self.assertTrue(np.array_equal(data["theta"], [[1.0, 2.0]]))
+                self.assertTrue(np.array_equal(data["model_outputs"], [[3.0]]))
+                self.assertTrue(np.array_equal(data["auxiliary/experiments/source_a"], [[4.0, 5.0]]))
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
-            self.assertEqual(rows[0], ["theta_0", "theta_1", "output_0", "elapsed_s", "worker_rank", "job_sequence"])
+            self.assertEqual(
+                rows[0],
+                ["z_0", "z_1", "theta_0", "theta_1", "output_0", "elapsed_s", "worker_rank", "job_sequence"],
+            )
             self.assertEqual(len(rows), 2)
 
 

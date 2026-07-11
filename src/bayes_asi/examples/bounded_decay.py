@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-import torch.nn.functional as functional
 
 from bayes_asi.config import AppConfig
-from bayes_asi.examples._common import float_vector, require_dimensions, unit_to_logit
+from bayes_asi.examples._common import float_vector, require_dimensions
+from bayes_asi.priors import IndependentPrior, uniform
 from bayes_asi.types import ForwardResult, SolverContext
 
 TIME_POINTS = torch.linspace(0.0, 3.0, 16, dtype=torch.float32)
@@ -39,24 +39,7 @@ class BoundedDecayPosterior:
     bounds: torch.Tensor
     observed: torch.Tensor
     noise_sd: float
-
-    def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
-        unit = np.clip(rng.random((n_chains, 3)), 1e-6, 1.0 - 1e-6)
-        return self.prior_transform(unit)
-
-    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
-        return unit_to_logit(unit, size=3)
-
-    def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
-        z = z.reshape(-1, 3)
-        bounds = self.bounds.to(device=z.device, dtype=z.dtype)
-        lower = bounds[:, 0]
-        span = bounds[:, 1] - bounds[:, 0]
-        return lower + span * torch.sigmoid(z)
-
-    def log_prior_z(self, z: torch.Tensor) -> torch.Tensor:
-        z = z.reshape(-1, 3)
-        return torch.sum(functional.logsigmoid(z) + functional.logsigmoid(-z), dim=-1)
+    prior: IndependentPrior
 
     def log_likelihood(self, theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         del theta
@@ -97,4 +80,5 @@ def make_posterior(
         bounds=torch.as_tensor(bounds_array),
         observed=observed,
         noise_sd=float(noise_sd),
+        prior=IndependentPrior([uniform(float(low), float(high)) for low, high in bounds_array]),
     )

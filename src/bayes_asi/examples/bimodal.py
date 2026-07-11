@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 from bayes_asi.config import AppConfig
-from bayes_asi.examples._common import require_dimensions, standard_normal_quantile
+from bayes_asi.examples._common import require_dimensions
+from bayes_asi.priors import IndependentPrior, normal
 from bayes_asi.types import ForwardResult, SolverContext
 
 
@@ -29,21 +30,13 @@ class BimodalPosterior:
     observed: float
     noise_sd: float
     prior_sd: float
-    mode_location: float
+    mode_z: float
+    prior: IndependentPrior
 
     def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
         signs = np.where(np.arange(n_chains) % 2 == 0, -1.0, 1.0)
-        centers = signs * self.mode_location
+        centers = signs * self.mode_z
         return rng.normal(centers, 0.25, size=n_chains).reshape(-1, 1).astype(np.float32)
-
-    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
-        return standard_normal_quantile(unit, size=1) * self.prior_sd
-
-    def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
-        return z.reshape(-1, 1)
-
-    def log_prior_z(self, z: torch.Tensor) -> torch.Tensor:
-        return -0.5 * (z.reshape(-1) / self.prior_sd) ** 2
 
     def log_likelihood(self, theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         del theta
@@ -72,5 +65,6 @@ def make_posterior(
         observed=float(theta_true**2),
         noise_sd=float(noise_sd),
         prior_sd=float(prior_sd),
-        mode_location=abs(float(theta_true)),
+        mode_z=abs(float(theta_true)) / float(prior_sd),
+        prior=IndependentPrior([normal(sd=prior_sd)]),
     )

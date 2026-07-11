@@ -21,11 +21,18 @@ class SolverContext:
 
 @dataclass(slots=True)
 class ForwardResult:
-    """Result returned by a black-box forward solver."""
+    """Surrogate target plus optional rich data returned by a forward solver."""
 
     outputs: np.ndarray
     metadata: dict[str, Any] = field(default_factory=dict)
     artifact_paths: list[str] = field(default_factory=list)
+    auxiliary: dict[str, np.ndarray] = field(default_factory=dict)
+
+    @property
+    def model_outputs(self) -> np.ndarray:
+        """Dense values that are trained by the surrogate and passed to the likelihood."""
+
+        return self.outputs
 
 
 class ForwardSolver(Protocol):
@@ -35,20 +42,28 @@ class ForwardSolver(Protocol):
         """Evaluate one physical parameter vector."""
 
 
+class PriorTransform(Protocol):
+    """Reversible map between a standard-normal reference and model parameters."""
+
+    @property
+    def latent_dim(self) -> int:
+        """Dimension of the independent standard-normal reference."""
+
+    @property
+    def parameter_dim(self) -> int:
+        """Dimension of the physical model parameters."""
+
+    def to_theta(self, z: torch.Tensor) -> torch.Tensor:
+        """Map standard-normal coordinates to physical solver parameters."""
+
+    def to_standard_normal(self, theta: np.ndarray) -> np.ndarray:
+        """Map physical solver parameters back to standard-normal coordinates."""
+
+
 class Posterior(Protocol):
-    """Problem-specific posterior interface evaluated on a surrogate."""
+    """Problem-specific likelihood evaluated on a surrogate model output."""
 
-    def initial_z(self, rng: np.random.Generator, n_chains: int) -> np.ndarray:
-        """Return initial unconstrained latent states for HMC chains."""
-
-    def prior_transform(self, unit: np.ndarray) -> np.ndarray:
-        """Map open-unit-cube quantiles to samples from the latent prior."""
-
-    def z_to_theta(self, z: torch.Tensor) -> torch.Tensor:
-        """Map unconstrained HMC variables to physical solver parameters."""
-
-    def log_prior_z(self, z: torch.Tensor) -> torch.Tensor:
-        """Return log prior density in unconstrained coordinates."""
+    prior: PriorTransform
 
     def log_likelihood(self, theta: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         """Return surrogate log likelihood for theta and predicted outputs."""
@@ -57,5 +72,5 @@ class Posterior(Protocol):
 class DifferentiableSurrogate(Protocol):
     """Tensor-to-tensor surrogate interface required by HMC."""
 
-    def __call__(self, theta: torch.Tensor) -> torch.Tensor:
+    def __call__(self, z: torch.Tensor) -> torch.Tensor:
         """Predict differentiable forward-model outputs."""

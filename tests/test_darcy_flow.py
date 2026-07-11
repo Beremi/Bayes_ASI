@@ -72,6 +72,9 @@ class DarcyFlowTests(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(result.outputs)))
             self.assertEqual(len(result.artifact_paths), 1)
             self.assertTrue(Path(result.artifact_paths[0]).is_file())
+            self.assertEqual(set(result.auxiliary), {"darcy/conductivity", "darcy/head"})
+            self.assertEqual(result.auxiliary["darcy/head"].shape, (20, 20))
+            self.assertEqual(result.auxiliary["darcy/conductivity"].dtype, np.float32)
 
     def test_invalid_grid_and_parameters_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 8"):

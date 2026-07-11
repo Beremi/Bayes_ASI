@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -11,6 +12,7 @@ class Job:
     job_id: str
     sequence: int
     theta: np.ndarray
+    z: np.ndarray | None = None
     attempt: int = 0
     source: str = "active"
     queued_at: float = 0.0
@@ -61,6 +63,25 @@ class QueueState:
     def running_theta(self) -> np.ndarray:
         rows = [job.theta for job in self.running.values()]
         return np.vstack(rows) if rows else np.empty((0, 0))
+
+    def pending_z(self) -> np.ndarray:
+        return self._stack_z(self.pending)
+
+    def running_z(self) -> np.ndarray:
+        return self._stack_z(self.running.values())
+
+    @staticmethod
+    def _stack_z(jobs: Iterable[Job]) -> np.ndarray:
+        jobs = list(jobs)
+        if not jobs:
+            return np.empty((0, 0))
+        if any(job.z is None for job in jobs):
+            raise ValueError("queued job is missing standard-normal coordinates")
+        rows: list[np.ndarray] = []
+        for job in jobs:
+            assert job.z is not None
+            rows.append(job.z)
+        return np.vstack(rows)
 
     def update_solve_time(self, elapsed_s: float, alpha: float = 0.2) -> None:
         if not np.isfinite(elapsed_s) or elapsed_s < 0.0:

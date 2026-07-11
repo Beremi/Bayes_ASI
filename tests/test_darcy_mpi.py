@@ -13,8 +13,10 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from scipy import special
 
 from bayes_asi.examples.darcy_flow import DEFAULT_BOUNDS
+from bayes_asi.storage import HDF5Store
 
 
 @unittest.skipUnless(
@@ -54,14 +56,23 @@ class DarcyMPITests(unittest.TestCase):
                 elapsed = np.asarray(h5["completed/elapsed_s"])
                 outputs = np.asarray(h5["completed/outputs"])
                 theta = np.asarray(h5["completed/theta"])
+                z = np.asarray(h5["completed/z"])
                 sequence = np.asarray(h5["completed/job_sequence"])
             self.assertTrue(np.all(elapsed >= 1.4))
             self.assertTrue(np.all(np.isfinite(outputs)))
-            initial_theta = theta[np.argsort(sequence)[:4]]
+            initial_indices = np.argsort(sequence)[:4]
+            initial_theta = theta[initial_indices]
+            initial_latent_unit = special.ndtr(z[initial_indices])
             unit = (initial_theta - DEFAULT_BOUNDS[:, 0]) / (DEFAULT_BOUNDS[:, 1] - DEFAULT_BOUNDS[:, 0])
+            self.assertTrue(np.allclose(unit, initial_latent_unit, atol=2e-6))
             for column in range(unit.shape[1]):
                 strata = np.floor(unit[:, column] * len(unit)).astype(int)
                 self.assertTrue(np.array_equal(np.sort(strata), np.arange(len(unit))))
+            store = HDF5Store(run_dir, parameter_dim=3, output_dim=13, latent_dim=3)
+            self.assertEqual(store.list_auxiliary_fields(), ["darcy/conductivity", "darcy/head"])
+            head = store.load_auxiliary("darcy/head")
+            self.assertEqual(head.values.shape[1:], (48, 48))
+            self.assertTrue(np.all(head.present))
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
             design_events = [event for event in events if event["type"] == "initial_design_generated"]
             self.assertEqual(design_events[0]["method"], "latin_hypercube_prior")
@@ -87,6 +98,7 @@ class DarcyMPITests(unittest.TestCase):
                 nx: 48
                 ny: 48
                 minimum_runtime_seconds: 1.5
+                save_fields: true
             posterior:
               factory: bayes_asi.examples.darcy_flow:make_posterior
               kwargs:

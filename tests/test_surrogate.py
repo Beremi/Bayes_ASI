@@ -25,7 +25,7 @@ class SurrogateTests(unittest.TestCase):
                 patience=20,
                 min_train_samples=4,
             ),
-            parameter_dim=2,
+            input_dim=2,
             output_dim=2,
             seed=5,
         )
@@ -55,6 +55,7 @@ class SurrogateTests(unittest.TestCase):
             loaded = SurrogateModel.load(path)
             self.assertTrue(np.allclose(result.model.predict_numpy(theta[:3]), loaded.predict_numpy(theta[:3])))
             self.assertEqual(loaded.training_samples, 40)
+            self.assertEqual(loaded.input_space, "standard_normal")
 
     def test_warm_start_preserves_predictions_when_normalization_changes(self) -> None:
         trainer = SurrogateTrainer(SurrogateConfig(hidden_layers=[5]), 2, 2, seed=3)
