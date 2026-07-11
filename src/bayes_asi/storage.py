@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import socket
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import h5py
 import numpy as np
+
+_fcntl: Any
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Bayes ASI targets POSIX MPI systems.
+    _fcntl = None
 
 SCHEMA_VERSION = 1
 _CHECKPOINT_PATTERN = re.compile(r"surrogate_v(\d+)\.pt$")
@@ -37,6 +46,39 @@ def _json_default(value: Any) -> Any:
 
 def now_seconds() -> float:
     return time.time()
+
+
+@contextmanager
+def exclusive_run_lock(run_dir: Path):
+    """Prevent concurrent rank-0 coordinators from sharing a run directory."""
+
+    if _fcntl is None:
+        raise RuntimeError("exclusive run locking requires a POSIX platform with fcntl")
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = run_dir / "run.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip() or "unknown owner"
+            raise RuntimeError(f"run directory is already active: {run_dir} ({owner})") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            json.dumps(
+                {"hostname": socket.gethostname(), "pid": os.getpid(), "started_at": now_seconds()},
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+        try:
+            yield lock_path
+        finally:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
 
 
 def stable_theta_key(theta: np.ndarray, decimals: int = 12) -> tuple[float, ...]:
@@ -126,6 +168,21 @@ class HDF5Store:
 
         with h5py.File(self.data_path, "r") as h5:
             return self._validate_completed_group(h5["completed"])
+
+    def snapshot_config(self, source: Path) -> tuple[Path, str]:
+        """Store an immutable content-addressed copy of a run configuration."""
+
+        source = Path(source)
+        content = source.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        directory = self.run_dir / "configs"
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"{digest[:12]}_{source.name}"
+        if not destination.exists():
+            temporary = destination.with_suffix(destination.suffix + ".tmp")
+            temporary.write_bytes(content)
+            os.replace(temporary, destination)
+        return destination, digest
 
     def append_completed(
         self,
@@ -297,8 +354,11 @@ def replay_queue_events(
             }
         elif event_type in {"job_completed", "job_cancelled"}:
             terminal.add(job_id)
-        elif event_type == "job_failed" and int(event.get("will_retry", 0)) == 0:
-            terminal.add(job_id)
+        elif event_type == "job_failed":
+            if int(event.get("will_retry", 0)) == 0:
+                terminal.add(job_id)
+            elif job_id in jobs:
+                jobs[job_id]["attempt"] = int(event.get("attempt", jobs[job_id]["attempt"])) + 1
     pending: list[dict[str, Any]] = []
     seen_keys: set[tuple[float, ...]] = set()
     for job_id, job in jobs.items():

@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 
 from bayes_asi.queue import Job, QueueState
-from bayes_asi.storage import HDF5Store, replay_queue_events, stable_theta_key
+from bayes_asi.storage import HDF5Store, exclusive_run_lock, replay_queue_events, stable_theta_key
 
 
 class StorageTests(unittest.TestCase):
@@ -80,6 +80,25 @@ class StorageTests(unittest.TestCase):
             )
             pending = replay_queue_events(store.read_events(), set())
             self.assertEqual(pending, [])
+
+    def test_retry_attempt_is_preserved_during_replay(self) -> None:
+        events = [
+            {
+                "type": "job_queued",
+                "job_id": "job_00000000",
+                "job_sequence": 0,
+                "theta": [1.0],
+                "attempt": 0,
+            },
+            {
+                "type": "job_failed",
+                "job_id": "job_00000000",
+                "attempt": 0,
+                "will_retry": 1,
+            },
+        ]
+        pending = replay_queue_events(events, set())
+        self.assertEqual(pending[0]["attempt"], 1)
 
     def test_clear_pending_preserves_running_jobs(self) -> None:
         queue = QueueState()
@@ -177,6 +196,26 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(event["scalar"], 3)
             self.assertEqual(event["array"], [1.0, 2.0])
             self.assertEqual(event["path"], "result.out")
+
+    def test_run_lock_rejects_a_second_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            with exclusive_run_lock(run_dir):
+                with self.assertRaisesRegex(RuntimeError, "already active"):
+                    with exclusive_run_lock(run_dir):
+                        self.fail("second lock unexpectedly acquired")
+
+    def test_config_snapshot_is_content_addressed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            source = Path(tmp) / "config.yaml"
+            source.write_text("problem: test\n", encoding="utf-8")
+            store = HDF5Store(run_dir, parameter_dim=1, output_dim=1)
+            first, digest = store.snapshot_config(source)
+            second, second_digest = store.snapshot_config(source)
+            self.assertEqual(first, second)
+            self.assertEqual(digest, second_digest)
+            self.assertEqual(first.read_text(encoding="utf-8"), "problem: test\n")
 
 
 if __name__ == "__main__":

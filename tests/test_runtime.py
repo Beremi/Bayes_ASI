@@ -106,17 +106,34 @@ hmc:
             trained = coordinator.trainer.train(data.theta, data.outputs, version=1)
             trained.model.save(coordinator.store.checkpoints_dir / "surrogate_v0001.pt")
             (coordinator.store.checkpoints_dir / "surrogate_v0002.pt").write_bytes(b"not a checkpoint")
+            coordinator.store.append_event(
+                "job_queued",
+                {
+                    "job_id": "job_00000099",
+                    "job_sequence": 99,
+                    "theta": [2.0, 2.0],
+                    "attempt": 0,
+                    "source": "surrogate_v2",
+                },
+            )
 
             restored = Coordinator(config, FakeComm())
 
             self.assertEqual(restored.surrogate_version, 1)
             self.assertEqual(restored.completed_at_last_train, 2)
+            self.assertEqual(restored.queue.pending_count, 0)
             failures = [
                 event
                 for event in restored.store.read_events()
                 if event["type"] == "surrogate_checkpoint_load_failed"
             ]
             self.assertEqual(len(failures), 1)
+            cancelled = [
+                event
+                for event in restored.store.read_events()
+                if event["type"] == "job_cancelled" and event["job_id"] == "job_00000099"
+            ]
+            self.assertEqual(len(cancelled), 1)
 
     def test_worker_turns_non_finite_solver_output_into_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

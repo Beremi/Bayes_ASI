@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -42,7 +43,7 @@ class HMCSampler:
         self.generator = torch.Generator(device=device)
         self.generator.manual_seed(self.seed)
 
-    def sample(self, initial_z: np.ndarray) -> HMCResult:
+    def sample(self, initial_z: np.ndarray, *, deadline_monotonic: float | None = None) -> HMCResult:
         current = torch.as_tensor(initial_z, dtype=torch.float32, device=self.device)
         if current.ndim == 1:
             current = current.reshape(1, -1)
@@ -71,6 +72,7 @@ class HMCSampler:
 
         total_iters = int(self.config.warmup_steps + self.config.samples_per_chain)
         for iteration in range(1, total_iters + 1):
+            self._check_deadline(deadline_monotonic)
             in_warmup = iteration <= self.config.warmup_steps
             if in_warmup:
                 leapfrog_steps = self._randint(min_l, max_l + 1)
@@ -87,6 +89,7 @@ class HMCSampler:
                 step_size,
                 leapfrog_steps,
                 inv_mass,
+                deadline_monotonic,
             )
             current_h = -current_logp + self._kinetic(momentum, inv_mass)
             proposal_h = -proposal_logp + self._kinetic(proposal_momentum, inv_mass)
@@ -151,6 +154,7 @@ class HMCSampler:
         step_size: float,
         leapfrog_steps: int,
         inv_mass: torch.Tensor,
+        deadline_monotonic: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         z_new = z.detach().clone()
         p_new = momentum.detach().clone()
@@ -158,6 +162,7 @@ class HMCSampler:
         p_new = p_new + 0.5 * step_size * grad
         log_prob = torch.full((z.shape[0],), -float("inf"), dtype=torch.float32, device=self.device)
         for step in range(leapfrog_steps):
+            self._check_deadline(deadline_monotonic)
             z_new = z_new + step_size * p_new * inv_mass
             log_prob, grad = self._log_prob_and_grad(z_new)
             if step != leapfrog_steps - 1:
@@ -187,6 +192,11 @@ class HMCSampler:
     @staticmethod
     def _bounded_step_size(log_step_size: float) -> float:
         return float(math.exp(min(math.log(10.0), max(math.log(1e-6), log_step_size))))
+
+    @staticmethod
+    def _check_deadline(deadline_monotonic: float | None) -> None:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("HMC reached the run deadline")
 
     def _tune_leapfrog_count(self, warmup_states: np.ndarray, step_size: float, min_l: int, max_l: int) -> int:
         variance = np.var(warmup_states, axis=0)

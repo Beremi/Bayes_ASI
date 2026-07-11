@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -68,6 +69,17 @@ class HMCTests(unittest.TestCase):
     def test_adapted_step_size_is_bounded(self) -> None:
         self.assertAlmostEqual(HMCSampler._bounded_step_size(-1000.0), 1e-6)
         self.assertAlmostEqual(HMCSampler._bounded_step_size(1000.0), 10.0)
+
+    def test_deadline_stops_sampling(self) -> None:
+        sampler = HMCSampler(
+            HMCConfig(n_chains=1, warmup_steps=0, samples_per_chain=1),
+            StandardNormalPosterior(),
+            ZeroSurrogate(),
+            seed=1,
+        )
+        with patch("bayes_asi.hmc.time.monotonic", return_value=10.0):
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                sampler.sample(np.zeros((1, 2), dtype=np.float32), deadline_monotonic=5.0)
 
 
 if __name__ == "__main__":

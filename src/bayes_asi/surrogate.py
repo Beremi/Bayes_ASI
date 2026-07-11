@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,7 @@ class TrainResult:
     epochs: int
     best_epoch: int
     trained_from_scratch: bool
+    stopped_by_deadline: bool
 
 
 class SurrogateTrainer:
@@ -188,6 +190,7 @@ class SurrogateTrainer:
         version: int,
         previous: SurrogateModel | None = None,
         force_scratch: bool = False,
+        deadline_monotonic: float | None = None,
     ) -> TrainResult:
         theta = np.asarray(theta, dtype=np.float32).reshape(-1, self.parameter_dim)
         outputs = np.asarray(outputs, dtype=np.float32).reshape(-1, self.output_dim)
@@ -253,18 +256,29 @@ class SurrogateTrainer:
         train_loss = float("inf")
         batch_size = max(1, int(self.config.batch_size))
         epochs_run = 0
+        stopped_by_deadline = False
 
         for epoch in range(1, self.config.max_epochs + 1):
-            epochs_run = epoch
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                stopped_by_deadline = True
+                break
             order = train_idx[torch.randperm(train_idx.numel(), generator=generator, device=self.device)]
             network.train()
+            interrupted = False
             for start in range(0, order.numel(), batch_size):
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    interrupted = True
+                    stopped_by_deadline = True
+                    break
                 batch_idx = order[start : start + batch_size]
                 optimizer.zero_grad(set_to_none=True)
                 pred = network(x_norm[batch_idx])
                 loss = loss_fn(pred, y_norm[batch_idx])
                 loss.backward()
                 optimizer.step()
+
+            if interrupted:
+                break
 
             network.eval()
             with torch.no_grad():
@@ -273,6 +287,7 @@ class SurrogateTrainer:
                     metric = float(loss_fn(network(x_norm[val_idx]), y_norm[val_idx]).detach().cpu())
                 else:
                     metric = train_loss
+            epochs_run = epoch
             scheduler.step(metric)
             if metric < best_metric:
                 best_metric = metric
@@ -284,6 +299,10 @@ class SurrogateTrainer:
             if stale_epochs >= self.config.patience:
                 break
 
+        if best_state is None:
+            if stopped_by_deadline:
+                raise TimeoutError("surrogate training reached the run deadline before completing an epoch")
+            raise RuntimeError("surrogate training did not produce a valid model state")
         if best_state is not None:
             network.load_state_dict(best_state)
         network.eval()
@@ -309,6 +328,7 @@ class SurrogateTrainer:
             epochs=epochs_run,
             best_epoch=best_epoch,
             trained_from_scratch=not warm_started,
+            stopped_by_deadline=stopped_by_deadline,
         )
 
     @staticmethod

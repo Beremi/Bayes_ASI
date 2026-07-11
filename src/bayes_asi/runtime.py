@@ -15,7 +15,7 @@ from bayes_asi.active import ActiveSelector
 from bayes_asi.config import AppConfig, build_factory_object, load_config
 from bayes_asi.hmc import HMCResult, HMCSampler
 from bayes_asi.queue import Job, QueueState
-from bayes_asi.storage import HDF5Store, replay_queue_events, stable_theta_key
+from bayes_asi.storage import HDF5Store, exclusive_run_lock, replay_queue_events, stable_theta_key
 from bayes_asi.surrogate import SurrogateModel, SurrogateTrainer
 from bayes_asi.types import ForwardResult, SolverContext
 
@@ -30,7 +30,8 @@ def run_mpi(config_path: str | Path) -> None:
     try:
         rank = comm.Get_rank()
         if rank == 0:
-            Coordinator(config, comm).run()
+            with exclusive_run_lock(config.run.output_dir):
+                Coordinator(config, comm).run()
         else:
             worker_loop(config, comm)
     except BaseException:
@@ -78,12 +79,15 @@ class Coordinator:
         next_status = 0.0
         stop_queueing = False
         budget_event_written = False
+        config_snapshot, config_sha256 = self.store.snapshot_config(self.config.config_path)
         self.store.append_event(
             "run_started",
             {
                 "worker_count": self.worker_count,
                 "time_budget_seconds": self.config.run.time_budget_seconds,
                 "config_path": str(self.config.config_path),
+                "config_snapshot": str(config_snapshot),
+                "config_sha256": config_sha256,
             },
         )
         self._import_initial_data()
@@ -91,7 +95,6 @@ class Coordinator:
 
         while True:
             self._receive_available_results()
-            self._maybe_train_surrogate()
 
             now = time.monotonic()
             if now >= deadline:
@@ -109,8 +112,14 @@ class Coordinator:
                     budget_event_written = True
 
             if not stop_queueing:
-                self._maybe_refill_active_queue()
-                self._assign_available_workers()
+                self._maybe_train_surrogate(deadline)
+                if time.monotonic() < deadline:
+                    self._maybe_refill_active_queue(deadline)
+                if time.monotonic() < deadline:
+                    self._assign_available_workers()
+
+            if not stop_queueing and time.monotonic() >= deadline:
+                continue
 
             if now >= next_status:
                 self._write_status(deadline, stop_queueing)
@@ -256,7 +265,12 @@ class Coordinator:
             max_sequence = max(max_sequence, sequence)
             source = str(job_data.get("source", "replayed"))
             source_version = self._source_surrogate_version(source)
-            if self.surrogate_version > 0 and source_version is not None and source_version < self.surrogate_version:
+            incompatible_source = (
+                self.surrogate_version > 0
+                and source_version is not None
+                and source_version != self.surrogate_version
+            )
+            if incompatible_source:
                 stale_jobs.append({"job_id": str(job_data["job_id"]), "sequence": sequence})
                 self.store.append_event(
                     "job_cancelled",
@@ -266,7 +280,7 @@ class Coordinator:
                         "theta": np.asarray(job_data["theta"], dtype=float).tolist(),
                         "attempt": int(job_data.get("attempt", 0)),
                         "source": source,
-                        "reason": "stale_surrogate_on_restore",
+                        "reason": "incompatible_surrogate_on_restore",
                         "surrogate_version": self.surrogate_version,
                     },
                 )
@@ -286,7 +300,7 @@ class Coordinator:
             self.store.append_event(
                 "queue_pending_cleared",
                 {
-                    "reason": "stale_surrogate_on_restore",
+                    "reason": "incompatible_surrogate_on_restore",
                     "surrogate_version": self.surrogate_version,
                     "cancelled_count": len(stale_jobs),
                     "job_ids": [str(job["job_id"]) for job in stale_jobs],
@@ -495,7 +509,7 @@ class Coordinator:
                 )
                 self.queue.add_pending(retry)
 
-    def _maybe_train_surrogate(self) -> None:
+    def _maybe_train_surrogate(self, deadline: float | None = None) -> None:
         if self.completed_count < self.config.surrogate.min_train_samples:
             return
         new_since_train = self.completed_count - self.completed_at_last_train
@@ -517,12 +531,14 @@ class Coordinator:
                 version=version,
                 previous=self.surrogate,
                 force_scratch=False,
+                deadline_monotonic=deadline,
             )
             chosen = warm
             run_scratch = (
                 self.surrogate is not None
                 and self.config.surrogate.retrain_from_scratch_every > 0
                 and (self.training_cycle + 1) % self.config.surrogate.retrain_from_scratch_every == 0
+                and (deadline is None or time.monotonic() < deadline)
             )
             if run_scratch:
                 scratch = self.trainer.train(
@@ -531,6 +547,7 @@ class Coordinator:
                     version=version,
                     previous=None,
                     force_scratch=True,
+                    deadline_monotonic=deadline,
                 )
                 threshold = warm.val_loss * (1.0 - self.config.surrogate.scratch_improvement_rel)
                 if scratch.val_loss < threshold:
@@ -553,6 +570,7 @@ class Coordinator:
                     "epochs": chosen.epochs,
                     "best_epoch": chosen.best_epoch,
                     "trained_from_scratch": chosen.trained_from_scratch,
+                    "stopped_by_deadline": chosen.stopped_by_deadline,
                 },
             )
             if previous_surrogate_version > 0 and completed.n > previous_completed_at_last_train:
@@ -573,7 +591,7 @@ class Coordinator:
                 },
             )
 
-    def _maybe_refill_active_queue(self) -> None:
+    def _maybe_refill_active_queue(self, deadline: float | None = None) -> None:
         if self.surrogate is None:
             self._ensure_initial_design()
             return
@@ -597,7 +615,7 @@ class Coordinator:
             queued_parts.append(running.reshape(-1, self.config.problem.parameter_dim))
         queued = np.vstack(queued_parts) if queued_parts else np.empty((0, self.config.problem.parameter_dim))
         try:
-            hmc_result = self._draw_surrogate_posterior()
+            hmc_result = self._draw_surrogate_posterior(deadline)
             candidate_count = min(self.config.active_learning.candidate_pool_size, hmc_result.theta.shape[0])
             if hmc_result.theta.shape[0] > candidate_count:
                 indices = self.rng.choice(hmc_result.theta.shape[0], size=candidate_count, replace=False)
@@ -648,7 +666,7 @@ class Coordinator:
                 },
             )
 
-    def _draw_surrogate_posterior(self) -> HMCResult:
+    def _draw_surrogate_posterior(self, deadline: float | None = None) -> HMCResult:
         if self.surrogate is None:
             raise RuntimeError("surrogate is not available")
         expected_shape = (self.config.hmc.n_chains, self.config.problem.latent_dim)
@@ -663,7 +681,7 @@ class Coordinator:
             seed=int(self.rng.integers(0, 2**31 - 1)),
             device=self.trainer.device,
         )
-        result = sampler.sample(initial_z)
+        result = sampler.sample(initial_z, deadline_monotonic=deadline)
         self.last_hmc_z = result.z[-self.config.hmc.n_chains :].copy()
         return result
 

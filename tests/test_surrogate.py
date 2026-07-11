@@ -86,6 +86,16 @@ class SurrogateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             trainer.train(np.array([[0.0], [1.0]]), np.array([[0.0], [np.nan]]), version=1)
 
+    def test_expired_deadline_stops_training(self) -> None:
+        trainer = SurrogateTrainer(SurrogateConfig(hidden_layers=[4], max_epochs=2), 1, 1, seed=1)
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            trainer.train(
+                np.array([[0.0], [1.0]]),
+                np.array([[0.0], [1.0]]),
+                version=1,
+                deadline_monotonic=0.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
