@@ -64,7 +64,12 @@ class LikelihoodTests(unittest.TestCase):
                 a_bounds=(-0.35, 0.4), b_bounds=(-0.55, 0.65),
             )
             pred, a, b = like.fit(torch.tensor(x[None, :], dtype=torch.float64))
-            ref = lsq_linear(np.column_stack((np.ones(t), x)), y, bounds=([-0.35, -0.55], [0.4, 0.65]), method="trf")
+            # BVLS with a tight tolerance is a more reliable independent
+            # reference than TRF for the deliberately ill-conditioned case.
+            ref = lsq_linear(
+                np.column_stack((np.ones(t), x)), y,
+                bounds=([-0.35, -0.55], [0.4, 0.65]), method="bvls", tol=1e-13,
+            )
             ref_pred = ref.x[0] + ref.x[1] * x
             ours_sse = float(torch.sum((pred[0, 0] - torch.tensor(y, dtype=torch.float64)) ** 2))
             ref_sse = float(np.sum((ref_pred - y) ** 2))

@@ -33,7 +33,7 @@ jobs:
       - name: Install package and example dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
+          python -m pip install -e '.[ogs]'
       - name: Run unit and callback tests
         run: python -m unittest discover -s tests
 
@@ -77,6 +77,11 @@ jobs:
     timeout-minutes: 20
     env:
       OMPI_MCA_rmaps_base_oversubscribe: "1"
+      # Open MPI 5 delegates launcher mapping to PRRTE.
+      PRTE_MCA_rmaps_default_mapping_policy: ":oversubscribe"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
