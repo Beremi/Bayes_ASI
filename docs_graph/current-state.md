@@ -4,6 +4,11 @@ Verified 2026-10-30. Branch `feat/multisurrogate-ogs-inversion` extends upstream
 `464e54c` for the Mont Terri workflow while preserving the default single-surrogate
 configuration.
 
+CI action updates from [PR 1](https://github.com/Beremi/Bayes_ASI/pull/1) and
+[PR 2](https://github.com/Beremi/Bayes_ASI/pull/2) are integrated here:
+SHA-pinned checkout 7.0.1 and setup-python 7.0.0. The removed setup-python
+`pip-install` input was unused. Open MPI 4/5 runner mapping is explicit.
+
 The optional hierarchy trains a strong teacher on completed forward evaluations,
 distils a smaller student, uses student HMC to propose candidates, and screens a
 bounded diverse subset with the teacher before filling the expensive solver queue.
