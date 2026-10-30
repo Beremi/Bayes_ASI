@@ -178,6 +178,21 @@ def normal(mean: float = 0.0, sd: float = 1.0) -> Marginal:
     )
 
 
+def truncated_normal(mean: float, sd: float, low: float, high: float) -> Marginal:
+    """Normal distribution conditioned on a finite open interval."""
+
+    mean = _finite_scalar(mean, "mean")
+    sd = _positive_scalar(sd, "sd")
+    low = _finite_scalar(low, "low")
+    high = _finite_scalar(high, "high")
+    if high <= low:
+        raise ValueError("high must be greater than low")
+    return scipy_marginal(
+        stats.truncnorm((low - mean) / sd, (high - mean) / sd, loc=mean, scale=sd),
+        name="truncated_normal",
+    )
+
+
 def exponential(rate: float = 1.0, *, shift: float = 0.0) -> Marginal:
     rate = _positive_scalar(rate, "rate")
     shift = _finite_scalar(shift, "shift")
@@ -262,6 +277,7 @@ _MARGINAL_FACTORIES: dict[str, Callable[..., Marginal]] = {
     "logistic": logistic,
     "lognormal": lognormal,
     "normal": normal,
+    "truncated_normal": truncated_normal,
     "student_t": student_t,
     "uniform": uniform,
     "weibull": weibull,

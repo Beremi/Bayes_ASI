@@ -1,0 +1,59 @@
+{
+  "verified": "2026-10-30",
+  "upstream_revision": "464e54c",
+  "branch": "feat/multisurrogate-ogs-inversion",
+  "python": "3.14.8",
+  "environment": {
+    "uses_system_site_packages": true,
+    "core_ogs_dev_requirements": "satisfied",
+    "pip_check": "8 unrelated inherited desktop/Jupyter requirements are missing; Bayes ASI declared requirements are satisfied"
+  },
+  "versions": {
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "torch": "2.14.1",
+    "mpi4py": "4.1.2",
+    "h5py": "3.16.0",
+    "PyYAML": "6.0.3"
+  },
+  "checks": {
+    "unit_and_real_fixture": "106 tests, 3 MPI gates skipped; passed",
+    "mpi_existing": "four synthetic examples and Darcy PDE; passed",
+    "mpi_hierarchy": "two three-rank runs across restart; all HDF5 outputs checked against analytic solver",
+    "wheel_mpi": {
+      "status": "passed",
+      "completed_forward_evaluations": 24,
+      "proposal_model": "student"
+    },
+    "ruff": "passed",
+    "mypy": "45 source files; passed",
+    "compileall": "passed",
+    "sdist_wheel_build": "passed",
+    "twine": "passed",
+    "artifact_inspection": "no datasets, checkpoints or run outputs",
+    "local_documentation_links": 41
+  },
+  "external_ogs": {
+    "parameter_dim": 207,
+    "output_dim": 700,
+    "archived_rows": 1980,
+    "prior_roundtrip_max_abs": 2.842170943040401e-14,
+    "kl_reference_cases": 20,
+    "kl_max_abs": 3.375077994860476e-14,
+    "likelihood_scipy_cases": 20,
+    "likelihood_max_abs": 4.831690603168681e-13,
+    "output_contract": "legacy_support_logtheta",
+    "imports_surrdamh": false,
+    "new_solver_runs": 1,
+    "dataset_sha256": "b6bcca74a6f277b17f0ee3ee3c9b5c044d6bda5722588c76feef0467026abea5",
+    "solver_elapsed_s": 193.3956000840044,
+    "native_vs_archived_max_abs": 1.4876988529977098e-14
+  },
+  "limits": [
+    "approximate surrogate-posterior HMC and active design, not exact delayed acceptance",
+    "built-in teacher and student are normalized MLPs; no public external graph/PINN teacher factory yet",
+    "native adapter is the named legacy 207-to-700 ERT contract, not every historical parameterization",
+    "legacy secondary-water extraction preserved; scientific observation policies unchanged",
+    "one native OGS migration check, not a new posterior or convergence study"
+  ]
+}

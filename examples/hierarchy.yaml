@@ -1,0 +1,46 @@
+run:
+  output_dir: runs/hierarchy
+  time_budget_seconds: 15
+  seed: 20261030
+  status_interval_seconds: 1
+
+problem:
+  latent_dim: 2
+  parameter_dim: 2
+  output_dim: 3
+solver:
+  factory: bayes_asi.examples.linear_gaussian:make_solver
+posterior:
+  factory: bayes_asi.examples.linear_gaussian:make_posterior
+
+initial_design:
+  n_points: 16
+surrogate:
+  hidden_layers: [64, 64]
+  min_train_samples: 8
+  update_after_new_samples: 4
+  max_epochs: 100
+  patience: 20
+
+hierarchy:
+  enabled: true
+  student:
+    hidden_layers: [8]
+    max_epochs: 80
+    patience: 15
+  distillation_points: 256
+  teacher_screen_size: 32
+  prediction_batch_size: 64
+  exploration_fraction: 0.125
+
+hmc:
+  n_chains: 4
+  warmup_steps: 20
+  samples_per_chain: 64
+  min_leapfrog_steps: 2
+  max_leapfrog_steps: 8
+active_learning:
+  candidate_pool_size: 256
+  batch_max_size: 4
+queue:
+  target_seconds_ahead: 1

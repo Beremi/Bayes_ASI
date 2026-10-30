@@ -51,6 +51,11 @@ Repository = "https://github.com/Beremi/Bayes_ASI"
 
 [project.optional-dependencies]
 examples = []
+ogs = [
+  "matplotlib>=3.7",
+  "meshio>=5.3",
+  "pandas>=2.0",
+]
 dev = [
   "build>=1.2",
   "mypy>=1.10",

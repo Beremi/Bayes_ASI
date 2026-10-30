@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ import numpy as np
 from scipy import special
 
 from bayes_asi.config import load_config
+from bayes_asi.hmc import HMCResult
 from bayes_asi.runtime import Coordinator, _evaluate_worker_job
 from bayes_asi.types import ForwardResult
 
@@ -52,6 +54,7 @@ class RuntimeTests(unittest.TestCase):
         initial_data: bool = True,
         retry_seconds: float = 60.0,
         posterior_factory: str = "bayes_asi.examples.synthetic:make_posterior",
+        hierarchy: bool = False,
     ):
         initial_section = (
             f"initial_data:\n  factory: {__name__}:make_initial_data\n"
@@ -59,6 +62,24 @@ class RuntimeTests(unittest.TestCase):
             else ""
         )
         path = run_dir.parent / f"config_{run_dir.name}.yaml"
+        hierarchy_section = ""
+        if hierarchy:
+            hierarchy_section = """
+hierarchy:
+  enabled: true
+  distillation_points: 6
+  teacher_screen_size: 4
+  prediction_batch_size: 2
+  exploration_fraction: 0.25
+  student:
+    hidden_layers: [3]
+    max_epochs: 2
+    min_train_samples: 2
+    validation_fraction: 0.0
+active_learning:
+  candidate_pool_size: 16
+  batch_max_size: 2
+"""
         path.write_text(
             f"""
 run:
@@ -84,6 +105,7 @@ hmc:
   n_chains: 1
   warmup_steps: 0
   samples_per_chain: 1
+{hierarchy_section}
 """,
             encoding="utf-8",
         )
@@ -280,6 +302,179 @@ hmc:
             )
             self.assertFalse(result["ok"])
             self.assertIn("non-finite", result["error"])
+
+    def test_hierarchy_trains_student_without_persisting_pseudo_truth_and_restarts_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", hierarchy=True)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator._import_initial_data()
+            coordinator._maybe_train_surrogate()
+
+            self.assertIsNotNone(coordinator.surrogate)
+            student = coordinator.student
+            self.assertIsNotNone(student)
+            assert student is not None
+            self.assertEqual(coordinator.surrogate_version, student.version)
+            self.assertEqual(coordinator.store.completed_count(), 2)
+            self.assertTrue((coordinator.store.checkpoints_dir / "surrogate_v0001.pt").exists())
+            self.assertTrue((coordinator.store.checkpoints_dir / "student_v0001.pt").exists())
+            student_events = [
+                event for event in coordinator.store.read_events() if event["type"] == "hierarchy_student_trained"
+            ]
+            self.assertEqual(student_events[-1]["genuine_completed_count"], 2)
+            self.assertEqual(student_events[-1]["pseudo_training_count"], 8)
+
+            restored = Coordinator(config, FakeComm())
+            self.assertEqual(restored.surrogate_version, 1)
+            restored_student = restored.student
+            self.assertIsNotNone(restored_student)
+            assert restored_student is not None
+            self.assertEqual(restored_student.version, 1)
+            self.assertEqual(restored.store.completed_count(), 2)
+            self.assertTrue(
+                any(event["type"] == "hierarchy_student_loaded" for event in restored.store.read_events())
+            )
+
+    def test_missing_student_checkpoint_is_regenerated_for_loaded_teacher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", hierarchy=True)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator._import_initial_data()
+            coordinator._maybe_train_surrogate()
+            (coordinator.store.checkpoints_dir / "student_v0001.pt").unlink()
+
+            restored = Coordinator(config, FakeComm())
+
+            self.assertIsNone(restored.student)
+            self.assertTrue(restored.student_regeneration_pending)
+            events = restored.store.read_events()
+            self.assertTrue(any(event["type"] == "hierarchy_student_regeneration_requested" for event in events))
+            self.assertFalse(
+                any(
+                    event["type"] == "hierarchy_student_trained"
+                    and event["reason"] == "restart_regeneration"
+                    for event in events
+                )
+            )
+
+            restored._maybe_regenerate_student(time.monotonic() + 10.0)
+
+            restored_student = restored.student
+            self.assertIsNotNone(restored_student)
+            assert restored_student is not None
+            self.assertEqual(restored_student.version, restored.surrogate_version)
+            events = restored.store.read_events()
+            self.assertTrue(
+                any(
+                    event["type"] == "hierarchy_student_trained"
+                    and event["reason"] == "restart_regeneration"
+                    for event in events
+                )
+            )
+
+    def test_hierarchy_uses_student_for_hmc_and_caps_teacher_screening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", hierarchy=True)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator._import_initial_data()
+            coordinator._maybe_train_surrogate()
+            teacher = coordinator.surrogate
+            self.assertIsNotNone(teacher)
+            assert teacher is not None
+            z = np.array(
+                [[-1.5, -1.0], [-1.0, 0.5], [-0.2, 1.4], [0.4, -1.3], [1.0, 0.8], [1.6, 1.2]],
+                dtype=float,
+            )
+            theta = 2.0 * z
+            result = HMCResult(
+                z=z,
+                theta=theta,
+                log_prob=np.linspace(-3.0, 2.0, len(z)),
+                accept_rate=0.8,
+                warmup_accept_rate=0.0,
+                step_size=0.05,
+                leapfrog_steps=2,
+                mass_diag=np.ones(2),
+            )
+            with patch("bayes_asi.runtime.HMCSampler") as sampler_type:
+                sampler_type.return_value.sample.return_value = result
+                coordinator._draw_surrogate_posterior()
+                self.assertIs(sampler_type.call_args.args[2], coordinator.student)
+                self.assertEqual(sampler_type.call_args.kwargs["device"], coordinator._hmc_surrogate().device)
+
+            teacher_predict_original = teacher.predict_numpy
+
+            def teacher_predict_with_nonfinite(points):
+                values = teacher_predict_original(points)
+                values[0] = np.nan
+                return values
+
+            with (
+                patch.object(coordinator, "_draw_surrogate_posterior", return_value=result),
+                patch.object(
+                    teacher,
+                    "predict_numpy",
+                    side_effect=teacher_predict_with_nonfinite,
+                ) as teacher_predict,
+            ):
+                coordinator._maybe_refill_active_queue()
+
+            screened = sum(call.args[0].shape[0] for call in teacher_predict.call_args_list)
+            self.assertLessEqual(screened, 4)
+            self.assertLessEqual(coordinator.queue.pending_count, 2)
+            self.assertEqual(coordinator.store.completed_count(), 2)
+            selected = [
+                event for event in coordinator.store.read_events() if event["type"] == "active_batch_selected"
+            ][-1]
+            self.assertEqual(selected["hmc_surrogate_role"], "student")
+            self.assertLessEqual(selected["teacher_screen_evaluated"], 4)
+            self.assertLess(selected["teacher_screen_finite"], selected["teacher_screen_evaluated"])
+            self.assertEqual(selected["selection_mode"], "approximate_student_teacher")
+
+    def test_student_training_failure_falls_back_explicitly_to_teacher_hmc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", hierarchy=True)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator._import_initial_data()
+            with patch.object(coordinator.student_trainer, "train", side_effect=RuntimeError("student failed")):
+                coordinator._maybe_train_surrogate()
+
+            self.assertIsNotNone(coordinator.surrogate)
+            self.assertIsNone(coordinator.student)
+            self.assertEqual(coordinator._hmc_surrogate_role(), "teacher")
+            failures = [
+                event
+                for event in coordinator.store.read_events()
+                if event["type"] == "hierarchy_student_train_failed"
+            ]
+            self.assertEqual(failures[-1]["fallback"], "teacher_for_hmc")
+
+    def test_replaced_same_version_teacher_does_not_load_stale_student(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(Path(tmp) / "run", hierarchy=True)
+            coordinator = Coordinator(config, FakeComm())
+            coordinator._import_initial_data()
+            coordinator._maybe_train_surrogate()
+            completed = coordinator.store.load_completed()
+            replacement = coordinator.trainer.train(
+                completed.z,
+                completed.outputs + 0.5,
+                version=1,
+                force_scratch=True,
+            )
+            replacement.model.save(coordinator.store.checkpoints_dir / "surrogate_v0001.pt")
+
+            restored = Coordinator(config, FakeComm())
+
+            self.assertEqual(restored.surrogate_version, 1)
+            self.assertIsNone(restored.student)
+            self.assertTrue(restored.student_regeneration_pending)
+            pair_failures = [
+                event
+                for event in restored.store.read_events()
+                if event["type"] == "hierarchy_student_checkpoint_load_failed"
+            ]
+            self.assertIn("fingerprint", pair_failures[-1]["error"])
 
 
 if __name__ == "__main__":

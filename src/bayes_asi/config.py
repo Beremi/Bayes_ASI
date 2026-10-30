@@ -203,6 +203,46 @@ class SurrogateConfig:
 
 
 @dataclass(slots=True)
+class HierarchyConfig:
+    """Optional approximate student/teacher active-learning hierarchy."""
+
+    enabled: bool = False
+    student: SurrogateConfig = field(
+        default_factory=lambda: SurrogateConfig(hidden_layers=[32, 32], min_train_samples=2)
+    )
+    distillation_points: int = 256
+    teacher_screen_size: int = 32
+    prediction_batch_size: int = 256
+    exploration_fraction: float = 0.2
+
+    def __post_init__(self) -> None:
+        if self.distillation_points <= 0:
+            raise ValueError("hierarchy.distillation_points must be positive")
+        if self.teacher_screen_size <= 0:
+            raise ValueError("hierarchy.teacher_screen_size must be positive")
+        if self.prediction_batch_size <= 0:
+            raise ValueError("hierarchy.prediction_batch_size must be positive")
+        if not 0.0 <= self.exploration_fraction <= 1.0:
+            raise ValueError("hierarchy.exploration_fraction must be in [0, 1]")
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> HierarchyConfig:
+        data = _mapping(raw, "hierarchy")
+        _reject_unknown(data, set(cls.__dataclass_fields__), "hierarchy")
+        student_raw = _mapping(data.get("student"), "hierarchy.student")
+        student_defaults = {"hidden_layers": [32, 32], "min_train_samples": 2}
+        student_defaults.update(student_raw)
+        return cls(
+            enabled=_as_bool(_get(data, "enabled", False), "hierarchy.enabled"),
+            student=SurrogateConfig.from_dict(student_defaults),
+            distillation_points=int(_get(data, "distillation_points", 256)),
+            teacher_screen_size=int(_get(data, "teacher_screen_size", 32)),
+            prediction_batch_size=int(_get(data, "prediction_batch_size", 256)),
+            exploration_fraction=float(_get(data, "exploration_fraction", 0.2)),
+        )
+
+
+@dataclass(slots=True)
 class HMCConfig:
     n_chains: int = 4
     warmup_steps: int = 100
@@ -329,6 +369,7 @@ class AppConfig:
     initial_data: FactoryConfig | None
     initial_design: InitialDesignConfig
     surrogate: SurrogateConfig
+    hierarchy: HierarchyConfig
     hmc: HMCConfig
     active_learning: ActiveLearningConfig
     queue: QueueConfig
@@ -347,6 +388,7 @@ def load_config(path: str | Path) -> AppConfig:
         "initial_data",
         "initial_design",
         "surrogate",
+        "hierarchy",
         "hmc",
         "active_learning",
         "queue",
@@ -355,6 +397,12 @@ def load_config(path: str | Path) -> AppConfig:
     for required in ("problem", "solver", "posterior"):
         if required not in raw:
             raise ValueError(f"missing required top-level section: {required}")
+    active_learning = ActiveLearningConfig.from_dict(_mapping(raw.get("active_learning"), "active_learning"))
+    hierarchy = HierarchyConfig.from_dict(_mapping(raw.get("hierarchy"), "hierarchy"))
+    if hierarchy.enabled and hierarchy.teacher_screen_size < active_learning.batch_max_size:
+        raise ValueError(
+            "hierarchy.teacher_screen_size must be >= active_learning.batch_max_size when hierarchy is enabled"
+        )
     return AppConfig(
         config_path=config_path,
         run=RunConfig.from_dict(_mapping(raw.get("run"), "run")),
@@ -368,8 +416,9 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         initial_design=InitialDesignConfig.from_dict(_mapping(raw.get("initial_design"), "initial_design")),
         surrogate=SurrogateConfig.from_dict(_mapping(raw.get("surrogate"), "surrogate")),
+        hierarchy=hierarchy,
         hmc=HMCConfig.from_dict(_mapping(raw.get("hmc"), "hmc")),
-        active_learning=ActiveLearningConfig.from_dict(_mapping(raw.get("active_learning"), "active_learning")),
+        active_learning=active_learning,
         queue=QueueConfig.from_dict(_mapping(raw.get("queue"), "queue")),
     )
 

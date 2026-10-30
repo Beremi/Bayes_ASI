@@ -23,6 +23,10 @@ wrappers remain in a separate problem package.
 - Standard-normal internal coordinates for design, surrogates, HMC, and selection.
 - Tanh multilayer-perceptron surrogates with input/output normalization.
 - Normalization-correct warm starts when new training data arrive.
+- Optional student/teacher hierarchy: cheap distilled HMC proposals, bounded
+  stronger-surrogate screening, and full-model queue selection.
+- KL field utilities, named/fixed parameters, truncated-normal priors, and
+  differentiable Gaussian/profiled-calibration likelihood components.
 - Multi-chain HMC with dual-averaged step-size and diagonal-mass adaptation.
 - Posterior-plus-distance active selection with duplicate and queue repulsion.
 - Prior-distribution Latin-hypercube bootstrapping when no samples are available.
@@ -146,6 +150,13 @@ The run directory contains:
 See [Architecture](docs/architecture.md) and [Operations](docs/operations.md)
 for lifecycle, restart, and failure semantics.
 
+For the two-surrogate workflow, run `examples/hierarchy.yaml` and read
+[Student proposals and teacher screening](docs/hierarchy.md). These are adaptive
+surrogate approximations; teacher screening does not turn HMC draws into an exact
+full-model posterior. The optional [OGS adapter](docs/ogs-integration.md) reuses
+an external model/data workspace without copying scientific assets into this
+repository.
+
 ## Examples
 
 | Configuration | Purpose | Dimensions `(z, theta, y)` |
@@ -155,6 +166,7 @@ for lifecycle, restart, and failure semantics.
 | `examples/bounded_decay.yaml` | Uniform bounded parameters from a Gaussian reference | `(3, 3, 16)` |
 | `examples/bimodal.yaml` | Symmetric two-mode posterior | `(1, 1, 1)` |
 | `examples/darcy_flow.yaml` | Three-material finite-volume Darcy flow | `(3, 3, 13)` |
+| `examples/hierarchy.yaml` | Student proposals and teacher screening | `(2, 2, 3)` |
 
 All examples have callback and gradient tests. The Darcy example also verifies
 material recovery and runs 1.5-second forward jobs through an end-to-end MPI
@@ -172,6 +184,7 @@ test. See [Examples](docs/examples.md) for equations and suggested experiments.
 - [Python and CLI API](docs/api.md)
 - [Development and release](docs/development.md)
 - [Changelog](CHANGELOG.md)
+- [Project map](docs_graph/README.md)
 
 ## Verification
 

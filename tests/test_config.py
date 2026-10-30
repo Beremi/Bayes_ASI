@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bayes_asi.config import HMCConfig, QueueConfig, SurrogateConfig, load_config, resolve_dotted
+from bayes_asi.config import HierarchyConfig, HMCConfig, QueueConfig, SurrogateConfig, load_config, resolve_dotted
 
 MINIMAL_CONFIG = """
 problem:
@@ -30,6 +30,8 @@ class ConfigTests(unittest.TestCase):
         config = load_config(self._write(MINIMAL_CONFIG))
         self.assertEqual(config.problem.latent_dim, 1)
         self.assertEqual(config.surrogate.hidden_layers, [64, 64])
+        self.assertFalse(config.hierarchy.enabled)
+        self.assertEqual(config.hierarchy.student.hidden_layers, [32, 32])
         self.assertTrue(config.run.output_dir.is_absolute())
 
     def test_unknown_option_is_rejected(self) -> None:
@@ -56,6 +58,25 @@ class ConfigTests(unittest.TestCase):
             HMCConfig(min_leapfrog_steps=5, max_leapfrog_steps=4)
         with self.assertRaisesRegex(ValueError, "max_pending"):
             QueueConfig(min_pending_per_worker=2, max_pending_per_worker=1)
+        with self.assertRaisesRegex(ValueError, "distillation_points"):
+            HierarchyConfig(distillation_points=0)
+        with self.assertRaisesRegex(ValueError, "exploration_fraction"):
+            HierarchyConfig(exploration_fraction=1.1)
+
+    def test_enabled_hierarchy_validates_screen_and_nested_student(self) -> None:
+        too_small = self._write(
+            MINIMAL_CONFIG
+            + "\nhierarchy:\n  enabled: true\n  teacher_screen_size: 2\n"
+            + "active_learning:\n  batch_max_size: 3\n"
+        )
+        with self.assertRaisesRegex(ValueError, "teacher_screen_size"):
+            load_config(too_small)
+
+        invalid_student = self._write(
+            MINIMAL_CONFIG + "\nhierarchy:\n  student:\n    hidden_layers: [0]\n"
+        )
+        with self.assertRaisesRegex(ValueError, "hidden_layers"):
+            load_config(invalid_student)
 
     def test_factory_path_validation_and_resolution(self) -> None:
         self.assertIs(resolve_dotted("bayes_asi.config:load_config"), load_config)

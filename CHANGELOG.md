@@ -3,6 +3,22 @@
 This project follows semantic versioning while public APIs remain explicitly
 marked alpha.
 
+## Unreleased
+
+### Added
+
+- Optional two-surrogate adaptive design: distilled student HMC proposals,
+  bounded teacher screening, matched checkpoint fingerprints and restart handling.
+- KL field evaluation, bounded mean-preserving fields and rotated permeability
+  tensors; named/fixed parameters and truncated-normal prior transports.
+- Differentiable Gaussian and box-constrained affine-profile likelihoods.
+- Native optional OGS adapter for the existing named 207-input/700-output
+  support-response contract, using external model/data assets.
+- Hierarchy MPI/restart and independent numerical-reference checks.
+
+The single-surrogate default is unchanged. Hierarchy samples remain approximate;
+this does not add exact full-model delayed-acceptance sampling.
+
 ## 0.6.0 - 2026-07-11
 
 ### Added

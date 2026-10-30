@@ -2,6 +2,10 @@
 
 Use these guides according to what you are doing:
 
+- [Surrogate hierarchy](hierarchy.md): cheap proposals, teacher screening,
+  checkpoints and approximation limits.
+- [OGS integration](ogs-integration.md): external KL fields and native solver callbacks.
+
 - [Getting started](getting-started.md): install, validate, run, inspect, and
   export a first inversion.
 - [Configuration reference](configuration.md): every YAML section, option,

@@ -45,6 +45,18 @@ BAYES_ASI_DARCY_MPI_TEST=1 PYTHONPATH=src python3 -m unittest tests.test_darcy_m
 
 ### External problem compatibility
 
+The two-surrogate queue/restart test is also opt-in:
+
+```bash
+BAYES_ASI_HIERARCHY_MPI_TEST=1 \
+  python -m unittest discover -s tests -p test_hierarchy_mpi.py
+```
+
+`GESA_OGS_WORKSPACE=/path/to/inversion_atempt` enables the external archived-data
+factory test. The separate `scripts/verify_ogs_adapter.py` command checks all
+archived prior round trips and selected field/likelihood reference cases; its
+optional one-job solve requires the model assets and native launcher.
+
 When changing callback contracts or configuration, run the tests in every
 known problem adapter with both source trees on `PYTHONPATH`. For the sibling
 OAS TPBT repository in the original workspace:

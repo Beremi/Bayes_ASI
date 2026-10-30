@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import time
@@ -15,6 +17,7 @@ from mpi4py import MPI
 from bayes_asi.active import ActiveSelector
 from bayes_asi.config import AppConfig, build_factory_object, load_config
 from bayes_asi.design import latin_hypercube
+from bayes_asi.hierarchy import draw_distillation_coordinates, prescreen_candidates
 from bayes_asi.hmc import HMCResult, HMCSampler
 from bayes_asi.priors import standard_normal_icdf
 from bayes_asi.queue import Job, QueueState
@@ -85,7 +88,16 @@ class Coordinator:
             config.problem.output_dim,
             seed=config.run.seed,
         )
+        self.student_trainer = SurrogateTrainer(
+            config.hierarchy.student,
+            config.problem.latent_dim,
+            config.problem.output_dim,
+            seed=config.run.seed + 7919,
+        )
         self.surrogate: SurrogateModel | None = None
+        self.student: SurrogateModel | None = None
+        self.student_regeneration_pending = False
+        self.next_student_attempt_at = 0.0
         self.surrogate_version = 0
         self.training_cycle = 0
         self.completed_at_last_train = 0
@@ -180,6 +192,8 @@ class Coordinator:
 
             if not stop_queueing:
                 self._maybe_train_surrogate(deadline)
+                if time.monotonic() < deadline:
+                    self._maybe_regenerate_student(deadline)
                 if time.monotonic() < deadline:
                     self._maybe_refill_active_queue(deadline)
                 if time.monotonic() < deadline:
@@ -348,6 +362,8 @@ class Coordinator:
                     "training_samples": candidate.training_samples,
                 },
             )
+            if self.config.hierarchy.enabled:
+                self._restore_student_or_defer(candidate, checkpoint)
             break
 
         pending = replay_queue_events(
@@ -725,6 +741,18 @@ class Coordinator:
                     "stopped_by_deadline": chosen.stopped_by_deadline,
                 },
             )
+            if self.config.hierarchy.enabled:
+                trained_student = self._train_student(
+                    chosen.model,
+                    completed.z,
+                    deadline=deadline,
+                    reason="teacher_trained",
+                )
+                self.student_regeneration_pending = not trained_student
+                if not trained_student:
+                    self.next_student_attempt_at = (
+                        time.monotonic() + self.config.hierarchy.student.failure_retry_seconds
+                    )
             if previous_surrogate_version > 0 and completed.n > previous_completed_at_last_train:
                 self._clear_pending_for_new_surrogate(
                     previous_surrogate_version=previous_surrogate_version,
@@ -742,6 +770,189 @@ class Coordinator:
                     "retry_after_seconds": self.config.surrogate.failure_retry_seconds,
                 },
             )
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _student_pair_metadata_path(self, version: int) -> Path:
+        return self.store.checkpoints_dir / f"student_v{version:04d}.pair.json"
+
+    def _write_student_pair_metadata(self, teacher: SurrogateModel, student_checkpoint: Path) -> None:
+        teacher_checkpoint = self.store.checkpoints_dir / f"surrogate_v{teacher.version:04d}.pt"
+        metadata_path = self._student_pair_metadata_path(teacher.version)
+        temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+        payload = {
+            "teacher_version": teacher.version,
+            "student_version": teacher.version,
+            "teacher_checkpoint_sha256": self._file_sha256(teacher_checkpoint),
+            "student_checkpoint_sha256": self._file_sha256(student_checkpoint),
+        }
+        temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, metadata_path)
+
+    def _validate_student_pair_metadata(
+        self,
+        teacher: SurrogateModel,
+        teacher_checkpoint: Path,
+        student_checkpoint: Path,
+    ) -> None:
+        metadata_path = self._student_pair_metadata_path(teacher.version)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if int(metadata["teacher_version"]) != teacher.version or int(metadata["student_version"]) != teacher.version:
+            raise ValueError("student pair metadata version does not match teacher")
+        if metadata["teacher_checkpoint_sha256"] != self._file_sha256(teacher_checkpoint):
+            raise ValueError("teacher checkpoint fingerprint does not match student pair metadata")
+        if metadata["student_checkpoint_sha256"] != self._file_sha256(student_checkpoint):
+            raise ValueError("student checkpoint fingerprint does not match pair metadata")
+
+    def _restore_student_or_defer(self, teacher: SurrogateModel, teacher_checkpoint: Path) -> None:
+        checkpoint = self.store.checkpoints_dir / f"student_v{teacher.version:04d}.pt"
+        if checkpoint.exists():
+            try:
+                self._validate_student_pair_metadata(teacher, teacher_checkpoint, checkpoint)
+                candidate = SurrogateModel.load(checkpoint, device=self.student_trainer.device)
+                if candidate.version != teacher.version:
+                    raise ValueError("student checkpoint version does not match teacher")
+                if candidate.input_dim != self.config.problem.latent_dim:
+                    raise ValueError("student checkpoint input dimension does not match configuration")
+                if candidate.output_dim != self.config.problem.output_dim:
+                    raise ValueError("student checkpoint output dimension does not match configuration")
+                if candidate.input_space != "standard_normal":
+                    raise ValueError("student checkpoint is not in standard-normal coordinates")
+                self.student = candidate
+                self.store.append_event(
+                    "hierarchy_student_loaded",
+                    {
+                        "teacher_version": teacher.version,
+                        "student_version": candidate.version,
+                        "checkpoint": str(checkpoint),
+                    },
+                )
+                self.student_regeneration_pending = False
+                return
+            except Exception as exc:
+                self.store.append_event(
+                    "hierarchy_student_checkpoint_load_failed",
+                    {"checkpoint": str(checkpoint), "teacher_version": teacher.version, "error": str(exc)},
+                )
+        self.student = None
+        self.student_regeneration_pending = True
+        self.store.append_event(
+            "hierarchy_student_regeneration_requested",
+            {
+                "teacher_version": teacher.version,
+                "reason": "missing_or_invalid_matching_checkpoint",
+                "deferred_until_run_deadline_available": True,
+                "fallback": "teacher_for_hmc",
+            },
+        )
+
+    def _maybe_regenerate_student(self, deadline: float) -> None:
+        if not self.student_regeneration_pending or self.surrogate is None:
+            return
+        now = time.monotonic()
+        if now >= deadline or now < self.next_student_attempt_at:
+            return
+        completed = self.store.load_completed()
+        success = self._train_student(
+            self.surrogate,
+            completed.z,
+            deadline=deadline,
+            reason="restart_regeneration",
+        )
+        self.student_regeneration_pending = not success
+        self.next_student_attempt_at = (
+            0.0 if success else time.monotonic() + self.config.hierarchy.student.failure_retry_seconds
+        )
+
+    def _predict_batched(
+        self,
+        model: SurrogateModel,
+        z: np.ndarray,
+        *,
+        deadline: float | None,
+        require_finite: bool = True,
+    ) -> np.ndarray:
+        values: list[np.ndarray] = []
+        batch_size = self.config.hierarchy.prediction_batch_size
+        for start in range(0, z.shape[0], batch_size):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("hierarchy prediction reached the run deadline")
+            values.append(model.predict_numpy(z[start : start + batch_size]))
+        result = np.vstack(values) if values else np.empty((0, self.config.problem.output_dim))
+        if result.shape != (z.shape[0], self.config.problem.output_dim) or (
+            require_finite and not np.all(np.isfinite(result))
+        ):
+            raise ValueError("hierarchy surrogate prediction returned non-finite or incorrectly shaped values")
+        return result
+
+    def _train_student(
+        self,
+        teacher: SurrogateModel,
+        completed_z: np.ndarray,
+        *,
+        deadline: float | None,
+        reason: str,
+    ) -> bool:
+        started = time.monotonic()
+        self.student = None
+        try:
+            rng = np.random.default_rng(self.config.run.seed + teacher.version * 104729)
+            generated_z = draw_distillation_coordinates(
+                rng,
+                completed_z,
+                self.config.hierarchy.distillation_points,
+            )
+            training_z = np.vstack([np.asarray(completed_z, dtype=np.float32), generated_z])
+            pseudo_outputs = self._predict_batched(teacher, training_z, deadline=deadline)
+            trained = self.student_trainer.train(
+                training_z,
+                pseudo_outputs,
+                version=teacher.version,
+                previous=None,
+                force_scratch=True,
+                deadline_monotonic=deadline,
+            )
+            student_outputs = self._predict_batched(trained.model, training_z, deadline=deadline)
+            disagreement_rmse = float(np.sqrt(np.mean((student_outputs - pseudo_outputs) ** 2)))
+            checkpoint = self.store.checkpoints_dir / f"student_v{teacher.version:04d}.pt"
+            trained.model.save(checkpoint)
+            self._write_student_pair_metadata(teacher, checkpoint)
+            self.student = trained.model
+            self.store.append_event(
+                "hierarchy_student_trained",
+                {
+                    "reason": reason,
+                    "teacher_version": teacher.version,
+                    "student_version": trained.model.version,
+                    "genuine_completed_count": int(np.asarray(completed_z).shape[0]),
+                    "distillation_point_count": int(generated_z.shape[0]),
+                    "pseudo_training_count": int(training_z.shape[0]),
+                    "disagreement_rmse": disagreement_rmse,
+                    "elapsed_s": time.monotonic() - started,
+                    "checkpoint": str(checkpoint),
+                },
+            )
+            return True
+        except Exception as exc:
+            self.student = None
+            self.store.append_event(
+                "hierarchy_student_train_failed",
+                {
+                    "reason": reason,
+                    "teacher_version": teacher.version,
+                    "fallback": "teacher_for_hmc",
+                    "elapsed_s": time.monotonic() - started,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            return False
 
     def _maybe_refill_active_queue(self, deadline: float | None = None) -> None:
         if self.surrogate is None:
@@ -779,15 +990,87 @@ class Coordinator:
                 candidate_theta = hmc_result.theta
                 candidate_logp = hmc_result.log_prob
             posterior_path = self._save_hmc_batch(hmc_result)
-            selected = self.selector.select(
-                candidate_z=candidate_z,
-                candidate_theta=candidate_theta,
-                candidate_log_prob=candidate_logp,
-                existing_z=completed.z,
-                queued_z=queued,
-                count=count,
-                known_keys=self.known_keys,
-            )
+            screening: dict[str, Any] = {}
+            if self.config.hierarchy.enabled:
+                screen_started = time.monotonic()
+                screen_indices = prescreen_candidates(
+                    selector=self.selector,
+                    rng=self.rng,
+                    candidate_z=candidate_z,
+                    candidate_theta=candidate_theta,
+                    candidate_log_prob=candidate_logp,
+                    existing_z=completed.z,
+                    queued_z=queued,
+                    known_keys=self.known_keys,
+                    screen_size=min(self.config.hierarchy.teacher_screen_size, candidate_z.shape[0]),
+                    exploration_fraction=self.config.hierarchy.exploration_fraction,
+                )
+                screen_z = candidate_z[screen_indices]
+                screen_theta = candidate_theta[screen_indices]
+                teacher_outputs = self._predict_batched(
+                    self.surrogate,
+                    screen_z,
+                    deadline=deadline,
+                    require_finite=False,
+                )
+                finite_outputs = np.all(np.isfinite(teacher_outputs), axis=1)
+                teacher_logp = np.full(screen_z.shape[0], -np.inf, dtype=float)
+                if np.any(finite_outputs):
+                    with torch.no_grad():
+                        theta_tensor = torch.as_tensor(
+                            screen_theta[finite_outputs], dtype=torch.float32, device=self.trainer.device
+                        )
+                        output_tensor = torch.as_tensor(
+                            teacher_outputs[finite_outputs], dtype=torch.float32, device=self.trainer.device
+                        )
+                        likelihood = self.posterior.log_likelihood(theta_tensor, output_tensor)
+                    teacher_logp[finite_outputs] = (
+                        -0.5 * np.sum(np.asarray(screen_z[finite_outputs], dtype=float) ** 2, axis=1)
+                        + likelihood.detach().cpu().numpy().reshape(-1)
+                    )
+                finite = np.isfinite(teacher_logp)
+                if self.student is not None and self.student.version == self.surrogate_version:
+                    student_outputs = self._predict_batched(self.student, screen_z, deadline=deadline)
+                    disagreement_rmse = (
+                        float(
+                            np.sqrt(
+                                np.mean(
+                                    (student_outputs[finite_outputs] - teacher_outputs[finite_outputs]) ** 2
+                                )
+                            )
+                        )
+                        if np.any(finite_outputs)
+                        else None
+                    )
+                else:
+                    disagreement_rmse = None
+                selected = self.selector.select(
+                    candidate_z=screen_z[finite],
+                    candidate_theta=screen_theta[finite],
+                    candidate_log_prob=teacher_logp[finite],
+                    existing_z=completed.z,
+                    queued_z=queued,
+                    count=count,
+                    known_keys=self.known_keys,
+                )
+                screening = {
+                    "teacher_screen_requested": int(self.config.hierarchy.teacher_screen_size),
+                    "teacher_screen_evaluated": int(screen_z.shape[0]),
+                    "teacher_screen_finite": int(np.count_nonzero(finite)),
+                    "student_teacher_disagreement_rmse": disagreement_rmse,
+                    "screening_elapsed_s": time.monotonic() - screen_started,
+                    "exploration_fraction": self.config.hierarchy.exploration_fraction,
+                }
+            else:
+                selected = self.selector.select(
+                    candidate_z=candidate_z,
+                    candidate_theta=candidate_theta,
+                    candidate_log_prob=candidate_logp,
+                    existing_z=completed.z,
+                    queued_z=queued,
+                    count=count,
+                    known_keys=self.known_keys,
+                )
             for z_row, theta_row in zip(selected.z, selected.theta, strict=True):
                 self._queue_theta(theta_row, z=z_row, source=f"surrogate_v{self.surrogate_version}")
             if selected.theta.shape[0] == 0:
@@ -807,6 +1090,13 @@ class Coordinator:
                     "posterior_batch_path": str(posterior_path),
                     "scores": selected.scores.tolist(),
                     "min_distances": selected.min_distances.tolist(),
+                    "selection_mode": (
+                        "approximate_student_teacher" if self.config.hierarchy.enabled else "single_surrogate"
+                    ),
+                    "hmc_surrogate_role": self._hmc_surrogate_role(),
+                    "teacher_version": self.surrogate_version,
+                    "student_version": self.student.version if self.student is not None else None,
+                    **screening,
                 },
             )
         except Exception as exc:
@@ -835,16 +1125,31 @@ class Coordinator:
                 raise ValueError(f"posterior initial_z must return finite shape {expected_shape}")
         else:
             initial_z = self.last_hmc_z
+        hmc_surrogate = self._hmc_surrogate()
         sampler = HMCSampler(
             self.config.hmc,
             self.posterior,
-            self.surrogate,
+            hmc_surrogate,
             seed=int(self.rng.integers(0, 2**31 - 1)),
-            device=self.trainer.device,
+            device=hmc_surrogate.device,
         )
         result = sampler.sample(initial_z, deadline_monotonic=deadline)
         self.last_hmc_z = result.z[-self.config.hmc.n_chains :].copy()
         return result
+
+    def _hmc_surrogate(self) -> SurrogateModel:
+        if self.surrogate is None:
+            raise RuntimeError("surrogate is not available")
+        if (
+            self.config.hierarchy.enabled
+            and self.student is not None
+            and self.student.version == self.surrogate_version
+        ):
+            return self.student
+        return self.surrogate
+
+    def _hmc_surrogate_role(self) -> str:
+        return "student" if self.surrogate is not None and self._hmc_surrogate() is self.student else "teacher"
 
     def _save_hmc_batch(self, hmc_result: HMCResult) -> Path:
         batch_dir = self.config.run.output_dir / "posterior_batches"
@@ -862,6 +1167,12 @@ class Coordinator:
             leapfrog_steps=np.asarray([hmc_result.leapfrog_steps], dtype=int),
             mass_diag=hmc_result.mass_diag,
             surrogate_version=np.asarray([self.surrogate_version], dtype=int),
+            teacher_version=np.asarray([self.surrogate_version], dtype=int),
+            student_version=np.asarray(
+                [self.student.version if self.student is not None else -1], dtype=int
+            ),
+            hmc_surrogate_role=np.asarray([self._hmc_surrogate_role()]),
+            hierarchy_approximate=np.asarray([self.config.hierarchy.enabled], dtype=bool),
         )
         os.replace(temporary, path)
         return path
@@ -892,6 +1203,12 @@ class Coordinator:
             "surrogate_val_loss": self.surrogate.val_loss if self.surrogate is not None else None,
             "surrogate_training_samples": self.surrogate.training_samples if self.surrogate is not None else None,
             "surrogate_input_space": "standard_normal",
+            "hierarchy_enabled": self.config.hierarchy.enabled,
+            "hierarchy_method": "approximate_adaptive_design" if self.config.hierarchy.enabled else None,
+            "teacher_version": self.surrogate_version if self.surrogate is not None else None,
+            "student_version": self.student.version if self.student is not None else None,
+            "student_regeneration_pending": self.student_regeneration_pending,
+            "hmc_surrogate_role": self._hmc_surrogate_role() if self.surrogate is not None else None,
         }
         self.store.update_status(status)
 
