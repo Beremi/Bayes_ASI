@@ -77,6 +77,11 @@ jobs:
     timeout-minutes: 20
     env:
       OMPI_MCA_rmaps_base_oversubscribe: "1"
+      # Open MPI 5 delegates launcher mapping to PRRTE.
+      PRTE_MCA_rmaps_default_mapping_policy: ":oversubscribe"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
