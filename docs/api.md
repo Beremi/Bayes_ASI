@@ -11,6 +11,9 @@ from bayes_asi import (
     ForwardSolver,
     GaussianCopulaPrior,
     IndependentPrior,
+    ParallelTemperedHMCConfig,
+    ParallelTemperedHMCResult,
+    ParallelTemperedHMCSampler,
     Posterior,
     PriorTransform,
     SolverContext,
@@ -35,6 +38,13 @@ from bayes_asi.priors import beta, exponential, gamma, lognormal, normal, unifor
 
 The same module exports Weibull, Student-t, Laplace, Logistic, generic SciPy,
 standard-normal density/quantile, and serializable-spec helpers.
+
+## Parallel-tempered HMC
+
+`ParallelTemperedHMCSampler(config, log_density, seed=...)` runs one
+replica-exchange ladder. See [Parallel-tempered HMC](parallel-tempering.md)
+for the callback contract, a complete example, result shapes, and limitations.
+This standalone API does not change the YAML/MPI sampler.
 
 ## `SolverContext`
 

@@ -3,6 +3,13 @@
 This project follows semantic versioning while public APIs remain explicitly
 marked alpha.
 
+## Unreleased
+
+### Added
+
+- Standalone parallel-tempered HMC Python API with reference-preserving replica
+  exchange, warmup adaptation, per-replica diagnostics, and a runnable example.
+
 ## 0.6.0 - 2026-07-11
 
 ### Added
