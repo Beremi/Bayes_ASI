@@ -24,6 +24,8 @@ wrappers remain in a separate problem package.
 - Tanh multilayer-perceptron surrogates with input/output normalization.
 - Normalization-correct warm starts when new training data arrive.
 - Multi-chain HMC with dual-averaged step-size and diagonal-mass adaptation.
+- [Parallel-tempered HMC](docs/parallel-tempering.md) through the Python API,
+  with replica exchange and an untempered reference density.
 - Posterior-plus-distance active selection with duplicate and queue repulsion.
 - Prior-distribution Latin-hypercube bootstrapping when no samples are available.
 - Time budgets, solver retries, failure backoff, status reporting, and export.

@@ -10,6 +10,8 @@ Use these guides according to what you are doing:
   and initial-data factories in an independent package.
 - [Architecture and algorithms](architecture.md): coordinator lifecycle,
   persistence, surrogate training, HMC, and active selection.
+- [Parallel-tempered HMC](parallel-tempering.md): standalone Python sampling,
+  temperature ladders, callback contracts, and diagnostics.
 - [Operations and troubleshooting](operations.md): run directories, budgets,
   restart behavior, failures, and common MPI issues.
 - [Examples](examples.md): equations, intended lessons, and run

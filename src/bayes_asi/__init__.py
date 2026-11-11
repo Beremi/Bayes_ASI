@@ -3,6 +3,11 @@
 from bayes_asi.config import AppConfig, FactoryConfig, load_config
 from bayes_asi.design import latin_hypercube
 from bayes_asi.priors import GaussianCopulaPrior, IndependentPrior
+from bayes_asi.tempered_hmc import (
+    ParallelTemperedHMCConfig,
+    ParallelTemperedHMCResult,
+    ParallelTemperedHMCSampler,
+)
 from bayes_asi.types import (
     DifferentiableSurrogate,
     ForwardResult,
@@ -23,6 +28,9 @@ __all__ = [
     "ForwardSolver",
     "GaussianCopulaPrior",
     "IndependentPrior",
+    "ParallelTemperedHMCConfig",
+    "ParallelTemperedHMCResult",
+    "ParallelTemperedHMCSampler",
     "Posterior",
     "PriorTransform",
     "SolverContext",
